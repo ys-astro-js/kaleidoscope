@@ -1,5 +1,15 @@
 import { type SyntheticEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  CloudUpload,
+  Play,
+  Repeat2,
+  ThumbsDown,
+  ThumbsUp,
+  Trash2,
+  X
+} from "lucide-react";
+import {
+  artUrl,
   audioUrl,
   deleteAllTracks,
   deleteTrack,
@@ -798,75 +808,92 @@ export default function App() {
       }}
     >
       <section className="topbar">
-        <button type="button" onClick={() => fileInputRef.current?.click()}>
-          Upload
-        </button>
-        {tracks.length > 0 ? (
-          <button type="button" onClick={() => void removeAllTracks()}>
-            Clear
-          </button>
-        ) : null}
-        <div className="mode-toggle" role="group" aria-label="view mode">
+        <div className="topbar-main">
+          <div className="control-group">
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Upload tracks"
+              title="Upload tracks"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <CloudUpload aria-hidden="true" size={18} strokeWidth={2.2} />
+            </button>
+            {tracks.length > 0 ? (
+              <button
+                type="button"
+                className="icon-button danger-button"
+                aria-label="Clear tracks"
+                title="Clear tracks"
+                onClick={() => void removeAllTracks()}
+              >
+                <Trash2 aria-hidden="true" size={18} strokeWidth={2.2} />
+              </button>
+            ) : null}
+          </div>
+          <div className="mode-toggle" role="group" aria-label="view mode">
+            <button
+              type="button"
+              className={viewMode === "2d" ? "active" : ""}
+              onClick={() => setViewMode("2d")}
+            >
+              2D
+            </button>
+            <button
+              type="button"
+              className={viewMode === "3d" ? "active" : ""}
+              onClick={() => setViewMode("3d")}
+            >
+              3D
+            </button>
+          </div>
+          <div className="mode-toggle" role="group" aria-label="similarity mode">
+            <button
+              type="button"
+              className={similarityMode === "track" ? "active" : ""}
+              onClick={() => {
+                setSimilarityMode("track");
+                resetAutoplayHistory();
+              }}
+            >
+              Track
+            </button>
+            <button
+              type="button"
+              className={similarityMode === "segment" ? "active" : ""}
+              onClick={() => setSimilarityMode("segment")}
+            >
+              Segment
+            </button>
+          </div>
           <button
             type="button"
-            className={viewMode === "2d" ? "active" : ""}
-            onClick={() => setViewMode("2d")}
-          >
-            2D
-          </button>
-          <button
-            type="button"
-            className={viewMode === "3d" ? "active" : ""}
-            onClick={() => setViewMode("3d")}
-          >
-            3D
-          </button>
-        </div>
-        <div className="mode-toggle" role="group" aria-label="similarity mode">
-          <button
-            type="button"
-            className={similarityMode === "track" ? "active" : ""}
+            className={
+              (similarityMode === "track" ? trackAutoplay : segmentAutoplay)
+                ? "autoplay-toggle with-icon active"
+                : "autoplay-toggle with-icon"
+            }
             onClick={() => {
-              setSimilarityMode("track");
-              resetAutoplayHistory();
+              if (similarityMode === "track") {
+                const next = !trackAutoplay;
+                setTrackAutoplay(next);
+                resetTrackAutoplayHistory(next && selected ? selected.id : undefined);
+                return;
+              }
+
+              const next = !segmentAutoplay;
+              setSegmentAutoplay(next);
+              if (next && selected) {
+                resetAutoplayHistory(selected.id, currentSegmentIndex);
+              } else {
+                resetAutoplayHistory();
+              }
             }}
           >
-            Track
-          </button>
-          <button
-            type="button"
-            className={similarityMode === "segment" ? "active" : ""}
-            onClick={() => setSimilarityMode("segment")}
-          >
-            Segment
+            <Repeat2 aria-hidden="true" size={16} strokeWidth={2.3} />
+            Auto
           </button>
         </div>
-        <button
-          type="button"
-          className={
-            (similarityMode === "track" ? trackAutoplay : segmentAutoplay)
-              ? "autoplay-toggle active"
-              : "autoplay-toggle"
-          }
-          onClick={() => {
-            if (similarityMode === "track") {
-              const next = !trackAutoplay;
-              setTrackAutoplay(next);
-              resetTrackAutoplayHistory(next && selected ? selected.id : undefined);
-              return;
-            }
-
-            const next = !segmentAutoplay;
-            setSegmentAutoplay(next);
-            if (next && selected) {
-              resetAutoplayHistory(selected.id, currentSegmentIndex);
-            } else {
-              resetAutoplayHistory();
-            }
-          }}
-        >
-          Auto
-        </button>
         <input
           ref={fileInputRef}
           type="file"
@@ -907,15 +934,28 @@ export default function App() {
           <h2>Similar tracks</h2>
           {similarTracks.map(({ score, track }) => (
             <div className="feedback-line" key={track.id}>
-              <div>
-                <strong>{track.title}</strong>
-                <span>{Math.round(score * 100)}%</span>
+              <div className="track-summary">
+                <img className="panel-art" src={artUrl(track.id)} alt="" loading="lazy" />
+                <div>
+                  <strong>{track.title}</strong>
+                  <span>{Math.round(score * 100)}%</span>
+                </div>
               </div>
               <div className="feedback-actions">
-                <button type="button" onClick={() => void sendFeedback(track, "similar")}>
+                <button
+                  type="button"
+                  className="with-icon"
+                  onClick={() => void sendFeedback(track, "similar")}
+                >
+                  <ThumbsUp aria-hidden="true" size={14} strokeWidth={2.4} />
                   Similar
                 </button>
-                <button type="button" onClick={() => void sendFeedback(track, "not_similar")}>
+                <button
+                  type="button"
+                  className="with-icon"
+                  onClick={() => void sendFeedback(track, "not_similar")}
+                >
+                  <ThumbsDown aria-hidden="true" size={14} strokeWidth={2.4} />
                   Not similar
                 </button>
               </div>
@@ -934,11 +974,17 @@ export default function App() {
               key={`${track.id}:${segmentIndex}`}
               onClick={() => playTrack(track, startSeconds)}
             >
-              <span>
-                <strong>{track.title}</strong>
-                <small>Segment {segmentIndex + 1}</small>
+              <span className="track-summary">
+                <img className="panel-art" src={artUrl(track.id)} alt="" loading="lazy" />
+                <span>
+                  <strong>{track.title}</strong>
+                  <small>Segment {segmentIndex + 1}</small>
+                </span>
               </span>
-              <span>{Math.round(score * 100)}%</span>
+              <span className="segment-score">
+                <Play aria-hidden="true" size={13} fill="currentColor" strokeWidth={0} />
+                {Math.round(score * 100)}%
+              </span>
             </button>
           ))}
         </section>
@@ -963,6 +1009,9 @@ export default function App() {
               <div className="error-actions">
                 <button
                   type="button"
+                  className="icon-button"
+                  aria-label={`Dismiss ${track.title}`}
+                  title="Dismiss"
                   onClick={() =>
                     setDismissedErrorIds((current) => {
                       const next = new Set(current);
@@ -971,10 +1020,16 @@ export default function App() {
                     })
                   }
                 >
-                  Dismiss
+                  <X aria-hidden="true" size={16} strokeWidth={2.4} />
                 </button>
-                <button type="button" onClick={() => void removeTrack(track)}>
-                  Delete
+                <button
+                  type="button"
+                  className="icon-button danger-button"
+                  aria-label={`Delete ${track.title}`}
+                  title="Delete"
+                  onClick={() => void removeTrack(track)}
+                >
+                  <Trash2 aria-hidden="true" size={16} strokeWidth={2.4} />
                 </button>
               </div>
             </div>
@@ -982,14 +1037,20 @@ export default function App() {
         </section>
       ) : null}
 
-      <section className="now-playing">
+      <section className={selected ? "now-playing active" : "now-playing idle"}>
         <div>
           <p>{selected?.title ?? ""}</p>
           <small>{selected?.artist ?? selected?.filename ?? ""}</small>
         </div>
         {selected ? (
-          <button type="button" onClick={() => void removeTrack(selected)}>
-            Delete
+          <button
+            type="button"
+            className="icon-button danger-button"
+            aria-label={`Delete ${selected.title}`}
+            title="Delete selected track"
+            onClick={() => void removeTrack(selected)}
+          >
+            <Trash2 aria-hidden="true" size={17} strokeWidth={2.4} />
           </button>
         ) : null}
         <audio
