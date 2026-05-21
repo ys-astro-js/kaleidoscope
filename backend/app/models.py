@@ -1,8 +1,20 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 TrackStatus = Literal["queued", "processing", "ready", "error"]
+FeedbackLabel = Literal["similar", "not_similar"]
+
+
+class FeedbackRequest(BaseModel):
+    query_track_id: str
+    candidate_track_id: str
+    label: str
+
+
+class SimilarTrack(BaseModel):
+    id: str
+    score: float
 
 
 class Track(BaseModel):
@@ -15,5 +27,5 @@ class Track(BaseModel):
     x: float | None = None
     y: float | None = None
     z: float | None = None
-    similar: list[str] = []
-
+    cluster: int | None = None
+    similar: list[SimilarTrack] = Field(default_factory=list)

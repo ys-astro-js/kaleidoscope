@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { audioUrl, deleteAllTracks, deleteTrack, fetchTracks, uploadTracks } from "./api";
+import {
+  audioUrl,
+  deleteAllTracks,
+  deleteTrack,
+  fetchTracks,
+  submitFeedback,
+  uploadTracks
+} from "./api";
 import MusicScene from "./MusicScene";
-import type { Track } from "./types";
+import type { FeedbackLabel, Track, ViewMode } from "./types";
 
 export default function App() {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [selected, setSelected] = useState<Track | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [message, setMessage] = useState("");
+  const [viewMode, setViewMode] = useState<ViewMode>("3d");
   const [dismissedErrorIds, setDismissedErrorIds] = useState<Set<string>>(() => new Set());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -24,9 +32,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadTracks().catch(() => setMessage("연결 실패"));
+    loadTracks().catch(() => setMessage("Connection failed"));
     const interval = window.setInterval(() => {
-      loadTracks().catch(() => setMessage("연결 실패"));
+      loadTracks().catch(() => setMessage("Connection failed"));
     }, 2500);
     return () => window.clearInterval(interval);
   }, [loadTracks]);
@@ -40,14 +48,25 @@ export default function App() {
     () => failedTracks.filter((track) => !dismissedErrorIds.has(track.id)),
     [dismissedErrorIds, failedTracks]
   );
+  const similarTracks = useMemo(() => {
+    if (!selected) {
+      return [];
+    }
+    return selected.similar
+      .map((similar) => ({
+        score: similar.score,
+        track: tracks.find((track) => track.id === similar.id)
+      }))
+      .filter((similar): similar is { score: number; track: Track } => Boolean(similar.track));
+  }, [selected, tracks]);
 
   const handleFiles = async (files: FileList | File[]) => {
     const selectedFiles = Array.from(files).filter(isAudioFile);
     if (selectedFiles.length === 0) {
-      setMessage("오디오 파일 없음");
+      setMessage("No audio files found");
       return;
     }
-    setMessage("업로드 중");
+    setMessage("Uploading");
     await uploadTracks(selectedFiles);
     setMessage("");
     await loadTracks();
@@ -66,6 +85,15 @@ export default function App() {
     };
   };
 
+  const sendFeedback = async (candidate: Track, label: FeedbackLabel) => {
+    if (!selected) {
+      return;
+    }
+    await submitFeedback(selected.id, candidate.id, label);
+    setMessage("Feedback saved");
+    await loadTracks();
+  };
+
   const removeTrack = async (track: Track) => {
     await deleteTrack(track.id);
     if (selected?.id === track.id) {
@@ -81,6 +109,10 @@ export default function App() {
   };
 
   const removeAllTracks = async () => {
+    const confirmed = window.confirm("Delete all tracks?");
+    if (!confirmed) {
+      return;
+    }
     await deleteAllTracks();
     audioRef.current?.pause();
     setSelected(null);
@@ -111,6 +143,22 @@ export default function App() {
             Clear
           </button>
         ) : null}
+        <div className="mode-toggle" role="group" aria-label="view mode">
+          <button
+            type="button"
+            className={viewMode === "2d" ? "active" : ""}
+            onClick={() => setViewMode("2d")}
+          >
+            2D
+          </button>
+          <button
+            type="button"
+            className={viewMode === "3d" ? "active" : ""}
+            onClick={() => setViewMode("3d")}
+          >
+            3D
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -129,7 +177,34 @@ export default function App() {
         {message ? <span className="status-pill">{message}</span> : null}
       </section>
 
-      <MusicScene tracks={tracks} selectedId={selected?.id ?? null} onSelect={playTrack} />
+      <MusicScene
+        tracks={tracks}
+        selectedId={selected?.id ?? null}
+        viewMode={viewMode}
+        onSelect={playTrack}
+      />
+
+      {selected && similarTracks.length > 0 ? (
+        <section className="feedback-panel" aria-label="similarity feedback">
+          <h2>Similar tracks</h2>
+          {similarTracks.map(({ score, track }) => (
+            <div className="feedback-line" key={track.id}>
+              <div>
+                <strong>{track.title}</strong>
+                <span>{Math.round(score * 100)}%</span>
+              </div>
+              <div className="feedback-actions">
+                <button type="button" onClick={() => void sendFeedback(track, "similar")}>
+                  Similar
+                </button>
+                <button type="button" onClick={() => void sendFeedback(track, "not_similar")}>
+                  Not similar
+                </button>
+              </div>
+            </div>
+          ))}
+        </section>
+      ) : null}
 
       {activeTracks.length > 0 ? (
         <section className="skeleton-stage" aria-label="processing tracks">

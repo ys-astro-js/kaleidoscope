@@ -85,6 +85,26 @@ def write_art_or_placeholder(track_id: str, art_bytes: bytes | None, art_dir: Pa
     return path
 
 
+def cached_art_thumbnail(art_path: Path, *, size: int = 256) -> Path:
+    thumb_dir = art_path.parent / "thumbs"
+    thumb_path = thumb_dir / f"{art_path.stem}.jpg"
+    if (
+        thumb_path.exists()
+        and art_path.exists()
+        and thumb_path.stat().st_mtime >= art_path.stat().st_mtime
+    ):
+        return thumb_path
+
+    try:
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        with Image.open(art_path) as image:
+            image.thumbnail((size, size), Image.Resampling.LANCZOS)
+            image.convert("RGB").save(thumb_path, format="JPEG", quality=82, optimize=True)
+        return thumb_path
+    except Exception:
+        return art_path
+
+
 def create_placeholder(path: Path, seed: str, size: int = 512) -> None:
     image = Image.new("RGB", (size, size), "#111111")
     draw = ImageDraw.Draw(image)

@@ -1,4 +1,11 @@
 export type TrackStatus = "queued" | "processing" | "ready" | "error";
+export type FeedbackLabel = "similar" | "not_similar";
+export type ViewMode = "2d" | "3d";
+
+export type SimilarTrack = {
+  id: string;
+  score: number;
+};
 
 export type Track = {
   id: string;
@@ -10,6 +17,6 @@ export type Track = {
   x: number | null;
   y: number | null;
   z: number | null;
-  similar: string[];
+  cluster: number | null;
+  similar: SimilarTrack[];
 };
-

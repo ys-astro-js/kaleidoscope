@@ -1,4 +1,4 @@
-import type { Track } from "./types";
+import type { FeedbackLabel, Track } from "./types";
 
 export async function fetchTracks(): Promise<Track[]> {
   const response = await fetch("/api/tracks");
@@ -34,11 +34,32 @@ export async function deleteTrack(trackId: string): Promise<void> {
 }
 
 export async function deleteAllTracks(): Promise<void> {
-  const response = await fetch("/api/tracks", {
+  const response = await fetch("/api/tracks?confirm=true", {
     method: "DELETE"
   });
   if (!response.ok) {
     throw new Error("Failed to delete tracks");
+  }
+}
+
+export async function submitFeedback(
+  queryTrackId: string,
+  candidateTrackId: string,
+  label: FeedbackLabel
+): Promise<void> {
+  const response = await fetch("/api/feedback", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      query_track_id: queryTrackId,
+      candidate_track_id: candidateTrackId,
+      label
+    })
+  });
+  if (!response.ok) {
+    throw new Error("Failed to submit feedback");
   }
 }
 

@@ -1,13 +1,18 @@
 import sqlite3
+import threading
 from pathlib import Path
 
 from app import database
 from app.audio import extract_metadata, normalize_audio_for_model, write_art_or_placeholder
 from app.config import Settings
 from app.embedding import get_embedder
-from app.layout import compute_layout
-from app.models import Track
-from app.vector_store import VectorStore
+from app.feedback import DEFAULT_WEIGHTS, learn_feedback_weights
+from app.layout import compute_similarity_layout
+from app.models import FeedbackLabel, SimilarTrack, Track
+from app.vector_store import SimilarityWeights, VectorStore
+
+SimilarById = dict[str, list[dict[str, float | str]]]
+SIMILAR_TRACK_LIMIT = 5
 
 
 class TrackService:
@@ -15,16 +20,25 @@ class TrackService:
         self.settings = settings
         self.conn = conn
         self.vectors = vectors
+        self._similar_lock = threading.Lock()
+        self._similar_cache: SimilarById = {}
+        self._similar_cache_weights: SimilarityWeights | None = None
+        self._similar_refreshing = False
 
     def list_tracks(self) -> list[Track]:
-        vectors = self.vectors.all_vectors()
+        similar_by_id = self.cached_similar_by_id()
+        embedded_ids = set(similar_by_id)
         rows = database.rows_to_dicts(database.list_tracks(self.conn))
+        row_ids = {row["id"] for row in rows}
         tracks: list[Track] = []
         for row in rows:
-            similar = []
-            vector = vectors.get(row["id"])
-            if row["status"] == "ready" and vector is not None:
-                similar = self.vectors.similar(vector, exclude_id=row["id"], limit=3)
+            similar = [
+                item
+                for item in similar_by_id.get(row["id"], [])
+                if item["id"] in row_ids
+            ]
+            if row["status"] != "ready" or row["id"] not in embedded_ids:
+                similar = []
             tracks.append(
                 Track(
                     id=row["id"],
@@ -36,10 +50,44 @@ class TrackService:
                     x=row["x"],
                     y=row["y"],
                     z=row["z"],
-                    similar=similar,
+                    cluster=None,
+                    similar=[SimilarTrack(id=str(item["id"]), score=float(item["score"])) for item in similar],
                 )
             )
         return tracks
+
+    def cached_similar_by_id(self) -> SimilarById:
+        weights = self.feedback_weights()
+        with self._similar_lock:
+            cached = self._similar_cache
+            cache_is_current = self._similar_cache_weights == weights
+            should_refresh = not cache_is_current and not self._similar_refreshing
+            if should_refresh:
+                self._similar_refreshing = True
+
+        if should_refresh:
+            thread = threading.Thread(
+                target=self._refresh_similarity_cache,
+                args=(weights,),
+                daemon=True,
+            )
+            thread.start()
+
+        return cached
+
+    def invalidate_similarity_cache(self) -> None:
+        with self._similar_lock:
+            self._similar_cache_weights = None
+
+    def _refresh_similarity_cache(self, weights: SimilarityWeights) -> None:
+        try:
+            similar_by_id = self.vectors.similar_by_track(limit=SIMILAR_TRACK_LIMIT, weights=weights)
+            with self._similar_lock:
+                self._similar_cache = similar_by_id
+                self._similar_cache_weights = weights
+        finally:
+            with self._similar_lock:
+                self._similar_refreshing = False
 
     def process_track(self, track_id: str) -> None:
         row = database.get_track(self.conn, track_id)
@@ -56,8 +104,14 @@ class TrackService:
                 self.settings.sample_rate,
             )
             embedder = get_embedder(self.settings.model_id, self.settings.sample_rate)
-            vector = embedder.embed_file(str(model_audio_path))
-            self.vectors.upsert(track_id, vector)
+            embeddings = embedder.embed_file(str(model_audio_path))
+            self.vectors.upsert(
+                track_id,
+                embeddings.global_semantic,
+                embeddings.segment_semantic,
+                embeddings.cover_chroma,
+            )
+            self.invalidate_similarity_cache()
             database.update_track(
                 self.conn,
                 track_id,
@@ -71,9 +125,51 @@ class TrackService:
 
     def recompute_layout(self) -> None:
         ready_ids = {row["id"] for row in database.ready_tracks(self.conn)}
-        vectors = {
-            track_id: vector
-            for track_id, vector in self.vectors.all_vectors().items()
+        embeddings = {
+            track_id: records
+            for track_id, records in self.vectors.all_embeddings().items()
             if track_id in ready_ids
         }
-        database.set_track_coords(self.conn, compute_layout(vectors))
+        similarities = self.vectors.similarity_matrix(
+            embeddings=embeddings,
+            weights=self.feedback_weights(),
+        )
+        database.set_track_coords(self.conn, compute_similarity_layout(similarities))
+
+    def record_feedback(
+        self,
+        *,
+        query_track_id: str,
+        candidate_track_id: str,
+        label: FeedbackLabel,
+    ) -> None:
+        database.insert_feedback_event(
+            self.conn,
+            query_track_id=query_track_id,
+            candidate_track_id=candidate_track_id,
+            label=label,
+        )
+        self.retrain_feedback_weights()
+        self.recompute_layout()
+
+    def retrain_feedback_weights(self) -> SimilarityWeights:
+        result = learn_feedback_weights(self.vectors, database.list_feedback_events(self.conn))
+        database.set_feedback_weights(
+            self.conn,
+            global_weight=result.weights.global_semantic,
+            segment_weight=result.weights.segment_semantic,
+            chroma_weight=result.weights.cover_chroma,
+            event_count=result.event_count,
+        )
+        self.invalidate_similarity_cache()
+        return result.weights
+
+    def feedback_weights(self) -> SimilarityWeights:
+        row = database.get_feedback_weights(self.conn)
+        if row is None:
+            return DEFAULT_WEIGHTS
+        return SimilarityWeights(
+            global_semantic=float(row["global_weight"]),
+            segment_semantic=float(row["segment_weight"]),
+            cover_chroma=float(row["chroma_weight"]),
+        )

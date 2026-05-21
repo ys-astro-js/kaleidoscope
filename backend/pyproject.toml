@@ -8,7 +8,9 @@ dependencies = [
   "uvicorn[standard]>=0.30.0",
   "python-multipart>=0.0.9",
   "muq>=0.1.0",
-  "torch>=2.3.0",
+  "torch==2.11.0+cu128",
+  "torchaudio==2.11.0+cu128",
+  "torchvision==0.26.0+cu128",
   "librosa>=0.10.2",
   "mutagen>=1.47.0",
   "lancedb>=0.13.0",
@@ -28,6 +30,16 @@ dev = [
 
 [tool.uv]
 package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.ruff]
 line-length = 100

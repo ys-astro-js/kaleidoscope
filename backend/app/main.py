@@ -1,14 +1,15 @@
 import asyncio
 from pathlib import Path
+from typing import cast
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from app import database
-from app.audio import save_upload, title_from_filename, write_art_or_placeholder
+from app.audio import cached_art_thumbnail, save_upload, title_from_filename, write_art_or_placeholder
 from app.config import ensure_data_dirs, get_settings
-from app.models import Track
+from app.models import FeedbackLabel, FeedbackRequest, Track
 from app.service import TrackService
 from app.vector_store import VectorStore
 
@@ -31,6 +32,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def resume_pending_tracks() -> None:
+    service.recompute_layout()
     for row in database.list_tracks(conn):
         if row["status"] in {"queued", "processing"}:
             asyncio.create_task(asyncio.to_thread(service.process_track, row["id"]))
@@ -62,6 +64,7 @@ async def upload_track(upload: UploadFile, background_tasks: BackgroundTasks) ->
         x=row["x"],
         y=row["y"],
         z=row["z"],
+        cluster=row["cluster"],
     )
 
 
@@ -70,12 +73,39 @@ def list_tracks() -> list[Track]:
     return service.list_tracks()
 
 
+@app.post("/api/feedback", status_code=204)
+def submit_feedback(feedback: FeedbackRequest) -> Response:
+    if feedback.query_track_id == feedback.candidate_track_id:
+        raise HTTPException(status_code=400, detail="Feedback requires two different tracks")
+    if feedback.label not in {"similar", "not_similar"}:
+        raise HTTPException(status_code=400, detail="Feedback label must be similar or not_similar")
+
+    query = database.get_track(conn, feedback.query_track_id)
+    candidate = database.get_track(conn, feedback.candidate_track_id)
+    if query is None or candidate is None:
+        raise HTTPException(status_code=404, detail="Track not found")
+    if query["status"] != "ready" or candidate["status"] != "ready":
+        raise HTTPException(status_code=400, detail="Feedback requires ready tracks")
+
+    service.record_feedback(
+        query_track_id=feedback.query_track_id,
+        candidate_track_id=feedback.candidate_track_id,
+        label=cast(FeedbackLabel, feedback.label),
+    )
+    return Response(status_code=204)
+
+
 @app.get("/api/tracks/{track_id}/art")
 def get_art(track_id: str) -> FileResponse:
     row = database.get_track(conn, track_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Track not found")
-    return FileResponse(row["art_path"])
+    art_path = cached_art_thumbnail(Path(row["art_path"]))
+    return FileResponse(
+        art_path,
+        media_type="image/jpeg" if art_path.suffix.lower() == ".jpg" else None,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.get("/api/tracks/{track_id}/audio")
@@ -90,10 +120,13 @@ def get_audio(track_id: str, range_header: str | None = Header(None, alias="Rang
 
 
 @app.delete("/api/tracks", status_code=204)
-def delete_all_tracks() -> Response:
+def delete_all_tracks(confirm: bool = False) -> Response:
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Track deletion requires confirm=true")
     rows = list(database.list_tracks(conn))
     for row in rows:
         _delete_track_assets(row)
+    service.retrain_feedback_weights()
     service.recompute_layout()
     return Response(status_code=204)
 
@@ -104,6 +137,7 @@ def delete_track(track_id: str) -> Response:
     if row is None:
         raise HTTPException(status_code=404, detail="Track not found")
     _delete_track_assets(row)
+    service.retrain_feedback_weights()
     service.recompute_layout()
     return Response(status_code=204)
 

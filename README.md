@@ -5,7 +5,7 @@
 ```bash
 cd backend
 uv sync
-uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 ## Frontend
@@ -15,4 +15,3 @@ cd frontend
 pnpm install
 pnpm dev
 ```
-
