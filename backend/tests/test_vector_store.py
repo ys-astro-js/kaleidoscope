@@ -181,3 +181,51 @@ def test_similarity_matrix_uses_same_weighted_scores_as_similar(monkeypatch) -> 
     assert semantic_matrix["selected"]["semantic"] == semantic_matrix["semantic"]["selected"]
     assert semantic_matrix["selected"]["semantic"] > semantic_matrix["selected"]["cover"]
     assert chroma_matrix["selected"]["cover"] > chroma_matrix["selected"]["semantic"]
+
+
+def test_similar_segments_returns_best_segment_per_track(monkeypatch) -> None:
+    store = VectorStore(Path("unused"))
+    monkeypatch.setattr(
+        store,
+        "all_embeddings",
+        lambda: {
+            "selected": [
+                segment_semantic(0, [1.0, 0.0]),
+                segment_semantic(1, [0.0, 1.0]),
+            ],
+            "early_match": [
+                segment_semantic(0, [0.1, 0.9]),
+                segment_semantic(1, [1.0, 0.0]),
+            ],
+            "late_match": [
+                segment_semantic(0, [0.0, 1.0]),
+                segment_semantic(1, [0.8, 0.6]),
+            ],
+        },
+    )
+
+    similar = store.similar_segments("selected", 1, limit=2)
+
+    assert similar[0]["id"] == "late_match"
+    assert similar[0]["segment_index"] == 0
+    assert similar[0]["start_seconds"] == 0.0
+    assert similar[1]["id"] == "early_match"
+    assert similar[1]["segment_index"] == 0
+
+
+def test_segment_counts_counts_stored_segment_embeddings(monkeypatch) -> None:
+    store = VectorStore(Path("unused"))
+    monkeypatch.setattr(
+        store,
+        "all_embeddings",
+        lambda: {
+            "selected": [
+                global_semantic([1.0, 0.0]),
+                segment_semantic(0, [1.0, 0.0]),
+                segment_semantic(1, [0.0, 1.0]),
+            ],
+            "empty": [global_semantic([0.0, 1.0])],
+        },
+    )
+
+    assert store.segment_counts() == {"selected": 2, "empty": 0}

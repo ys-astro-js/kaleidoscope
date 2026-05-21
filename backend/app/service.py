@@ -28,6 +28,11 @@ class TrackService:
     def list_tracks(self) -> list[Track]:
         similar_by_id = self.cached_similar_by_id()
         embedded_ids = set(similar_by_id)
+        segment_counts = (
+            self.vectors.segment_counts()
+            if hasattr(self.vectors, "segment_counts")
+            else {}
+        )
         rows = database.rows_to_dicts(database.list_tracks(self.conn))
         row_ids = {row["id"] for row in rows}
         tracks: list[Track] = []
@@ -51,6 +56,7 @@ class TrackService:
                     y=row["y"],
                     z=row["z"],
                     cluster=None,
+                    segment_count=segment_counts.get(row["id"], 0),
                     similar=[SimilarTrack(id=str(item["id"]), score=float(item["score"])) for item in similar],
                 )
             )

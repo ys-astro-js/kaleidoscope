@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
+SEGMENT_HOP_SECONDS = 15.0
 TABLE_NAME = "track_embeddings"
 CHROMA_TABLE_NAME = "track_chroma_embeddings"
 GLOBAL_SEMANTIC_KIND = "global_semantic"
@@ -120,6 +121,23 @@ class VectorStore:
             )
         return embeddings
 
+    def segment_counts(
+        self,
+        embeddings: dict[str, list[EmbeddingRecord]] | None = None,
+    ) -> dict[str, int]:
+        embeddings = embeddings if embeddings is not None else self.all_embeddings()
+        return {
+            track_id: len(
+                {
+                    record.segment_index
+                    for record in records
+                    if _canonical_kind(record.kind) == SEGMENT_SEMANTIC_KIND
+                    and record.segment_index >= 0
+                }
+            )
+            for track_id, records in embeddings.items()
+        }
+
     def similar(
         self,
         track_id: str,
@@ -199,6 +217,45 @@ class VectorStore:
             return None
         return _feature_scores(query, candidate)
 
+    def similar_segments(
+        self,
+        track_id: str,
+        segment_index: int,
+        *,
+        limit: int = 5,
+        embeddings: dict[str, list[EmbeddingRecord]] | None = None,
+    ) -> list[dict[str, float | int | str]]:
+        embeddings = embeddings if embeddings is not None else self.all_embeddings()
+        normalized = _normalize_embeddings(embeddings)
+        query_track = normalized.get(track_id)
+        if query_track is None:
+            return []
+        query_segment = _segment_at(query_track.segment_semantic, segment_index)
+        if query_segment is None:
+            return []
+
+        scored: list[tuple[str, float, int]] = []
+        for candidate_id, candidate in normalized.items():
+            if candidate_id == track_id or not candidate.segment_semantic:
+                continue
+            candidate_scores = [
+                (index, _cosine_score(query_segment, candidate_segment))
+                for index, candidate_segment in enumerate(candidate.segment_semantic)
+            ]
+            candidate_segment_index, score = max(candidate_scores, key=lambda item: item[1])
+            scored.append((candidate_id, score, candidate_segment_index))
+
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return [
+            {
+                "id": candidate_id,
+                "score": score,
+                "segment_index": candidate_segment_index,
+                "start_seconds": candidate_segment_index * SEGMENT_HOP_SECONDS,
+            }
+            for candidate_id, score, candidate_segment_index in scored[:limit]
+        ]
+
     def _connect(self):
         import lancedb
 
@@ -248,7 +305,7 @@ def _normalize_embeddings(
     normalized: dict[str, NormalizedEmbeddings] = {}
     for track_id, records in embeddings.items():
         track = NormalizedEmbeddings()
-        for record in records:
+        for record in sorted(records, key=lambda item: item.segment_index):
             array = _as_normalized_array(record.vector)
             if array is None:
                 continue
@@ -351,6 +408,12 @@ def _top_segment_score(
         reverse=True,
     )
     return _clamp_score(float(np.mean(scores[:top_k])))
+
+
+def _segment_at(segments: list[np.ndarray], segment_index: int) -> np.ndarray | None:
+    if segment_index < 0 or segment_index >= len(segments):
+        return None
+    return segments[segment_index]
 
 
 def _chroma_cover_score(

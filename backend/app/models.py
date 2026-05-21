@@ -17,6 +17,13 @@ class SimilarTrack(BaseModel):
     score: float
 
 
+class SimilarSegment(BaseModel):
+    id: str
+    score: float
+    segment_index: int
+    start_seconds: float
+
+
 class Track(BaseModel):
     id: str
     filename: str
@@ -28,4 +35,5 @@ class Track(BaseModel):
     y: float | None = None
     z: float | None = None
     cluster: int | None = None
+    segment_count: int = 0
     similar: list[SimilarTrack] = Field(default_factory=list)

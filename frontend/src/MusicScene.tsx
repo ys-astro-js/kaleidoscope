@@ -2,12 +2,16 @@ import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { artUrl } from "./api";
-import type { Track, ViewMode } from "./types";
+import type { SimilarTrack, Track, ViewMode } from "./types";
 
 type Props = {
   tracks: Track[];
   selectedId: string | null;
   viewMode: ViewMode;
+  linkSourceId: string | null;
+  similarLinks: SimilarTrack[] | null;
+  highlightedLinkId: string | null;
+  focusedTrackIds: string[] | null;
   onSelect: (track: Track) => void;
 };
 
@@ -30,6 +34,7 @@ type ShimmerLineMaterial = THREE.ShaderMaterial & {
     uDashed: { value: number };
   };
 };
+type SimilarityLineStyle = "primary" | "secondary" | "next";
 
 const CAMERA_2D_DISTANCE = 26;
 const CAMERA_3D_POSITION = new THREE.Vector3(0, 0, 12);
@@ -41,12 +46,26 @@ const PRIMARY_SIMILAR_LIMIT = 5;
 const SECONDARY_SIMILAR_LIMIT = 3;
 const PRIMARY_LINE_RADIUS = 0.016;
 const SECONDARY_LINE_RADIUS = PRIMARY_LINE_RADIUS;
+const NEXT_LINE_RADIUS = 0.034;
 
-export default function MusicScene({ tracks, selectedId, viewMode, onSelect }: Props) {
+export default function MusicScene({
+  tracks,
+  selectedId,
+  viewMode,
+  linkSourceId,
+  similarLinks,
+  highlightedLinkId,
+  focusedTrackIds,
+  onSelect,
+}: Props) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const onSelectRef = useRef(onSelect);
   const tracksRef = useRef(tracks);
   const selectedRef = useRef(selectedId);
+  const linkSourceRef = useRef(linkSourceId);
+  const similarLinksRef = useRef(similarLinks);
+  const highlightedLinkRef = useRef(highlightedLinkId);
+  const focusedTrackIdsRef = useRef(focusedTrackIds);
   const viewModeRef = useRef<ViewMode>(viewMode);
   const rebuildSceneRef = useRef<(() => void) | null>(null);
   const applyViewModeRef = useRef<(() => void) | null>(null);
@@ -64,6 +83,25 @@ export default function MusicScene({ tracks, selectedId, viewMode, onSelect }: P
     selectedRef.current = selectedId;
     rebuildSceneRef.current?.();
   }, [selectedId]);
+
+  useEffect(() => {
+    linkSourceRef.current = linkSourceId;
+    rebuildSceneRef.current?.();
+  }, [linkSourceId]);
+
+  useEffect(() => {
+    similarLinksRef.current = similarLinks;
+    rebuildSceneRef.current?.();
+  }, [similarLinks]);
+
+  useEffect(() => {
+    highlightedLinkRef.current = highlightedLinkId;
+    rebuildSceneRef.current?.();
+  }, [highlightedLinkId]);
+
+  useEffect(() => {
+    focusedTrackIdsRef.current = focusedTrackIds;
+  }, [focusedTrackIds]);
 
   useEffect(() => {
     if (viewModeRef.current === viewMode) {
@@ -158,7 +196,11 @@ export default function MusicScene({ tracks, selectedId, viewMode, onSelect }: P
 
         for (const track of readyTracks) {
           const texture = getTexture(textureCache, textureLoader, track.id);
-          const material = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+          const material = new THREE.MeshBasicMaterial({
+            map: texture,
+            side: THREE.DoubleSide,
+            transparent: true,
+          });
           const mesh = new THREE.Mesh(new THREE.PlaneGeometry(NODE_SIZE, NODE_SIZE), material);
           mesh.position.copy(trackPosition(track, displayPositions));
           mesh.renderOrder = 1;
@@ -174,7 +216,13 @@ export default function MusicScene({ tracks, selectedId, viewMode, onSelect }: P
         }
       }
 
-      const nextLinkSignature = createLinkSignature(readyTracks, selectedRef.current);
+      const nextLinkSignature = createLinkSignature(
+        readyTracks,
+        selectedRef.current,
+        linkSourceRef.current,
+        similarLinksRef.current,
+        highlightedLinkRef.current
+      );
       if (!nodesChanged && nextLinkSignature === linkSignature) {
         return;
       }
@@ -184,10 +232,13 @@ export default function MusicScene({ tracks, selectedId, viewMode, onSelect }: P
       scoreLabelRecords.length = 0;
       shimmerMaterials.length = 0;
 
-      const selected = readyTracks.find((track) => track.id === selectedRef.current);
-      if (selected) {
+      const source = readyTracks.find(
+        (track) => track.id === (linkSourceRef.current ?? selectedRef.current)
+      );
+      if (source) {
         const readyTracksById = new Map(readyTracks.map((track) => [track.id, track]));
-        const related = selected.similar
+        const primaryLinks = similarLinksRef.current ?? source.similar;
+        const related = primaryLinks
           .slice(0, PRIMARY_SIMILAR_LIMIT)
           .map((similar) => ({
             score: similar.score,
@@ -197,9 +248,9 @@ export default function MusicScene({ tracks, selectedId, viewMode, onSelect }: P
 
         for (const target of related) {
           const line = createSimilarityLine(
-            trackPosition(selected, displayPositions),
+            trackPosition(source, displayPositions),
             trackPosition(target.track, displayPositions),
-            false
+            target.track.id === highlightedLinkRef.current ? "next" : "primary"
           );
           lineGroup.add(line);
           shimmerMaterials.push(...collectShimmerMaterials(line));
@@ -212,18 +263,20 @@ export default function MusicScene({ tracks, selectedId, viewMode, onSelect }: P
           }
         }
 
-        for (const link of createSecondarySimilarityLinks(
-          selected,
-          related.map((item) => item.track),
-          readyTracksById
-        )) {
-          const line = createSimilarityLine(
-            trackPosition(link.source, displayPositions),
-            trackPosition(link.target, displayPositions),
-            true
-          );
-          lineGroup.add(line);
-          shimmerMaterials.push(...collectShimmerMaterials(line));
+        if (!similarLinksRef.current) {
+          for (const link of createSecondarySimilarityLinks(
+            source,
+            related.map((item) => item.track),
+            readyTracksById
+          )) {
+            const line = createSimilarityLine(
+              trackPosition(link.source, displayPositions),
+              trackPosition(link.target, displayPositions),
+              "secondary"
+            );
+            lineGroup.add(line);
+            shimmerMaterials.push(...collectShimmerMaterials(line));
+          }
         }
       }
       linkSignature = nextLinkSignature;
@@ -273,7 +326,12 @@ export default function MusicScene({ tracks, selectedId, viewMode, onSelect }: P
           record.mesh.lookAt(camera.position);
         }
         const isSelected = record.track.id === selectedRef.current;
-        record.mesh.scale.setScalar(isSelected ? 1.18 : 1);
+        const isFocused =
+          !focusedTrackIdsRef.current || focusedTrackIdsRef.current.includes(record.track.id);
+        const material = record.mesh.material as THREE.MeshBasicMaterial;
+        material.opacity = isFocused ? 1 : 0.18;
+        record.mesh.renderOrder = isFocused ? 1 : 0;
+        record.mesh.scale.setScalar(isSelected ? 1.18 : isFocused ? 1 : 0.82);
       }
       for (const record of scoreLabelRecords) {
         record.sprite.position.copy(record.mesh.position);
@@ -477,28 +535,41 @@ function createNodeSignature(tracks: Track[], viewMode: ViewMode): string {
     .join("|");
 }
 
-function createLinkSignature(tracks: Track[], selectedId: string | null): string {
-  const selected = tracks.find((track) => track.id === selectedId);
-  if (!selected) {
+function createLinkSignature(
+  tracks: Track[],
+  selectedId: string | null,
+  linkSourceId: string | null,
+  similarLinks: SimilarTrack[] | null,
+  highlightedLinkId: string | null
+): string {
+  const source = tracks.find((track) => track.id === (linkSourceId ?? selectedId));
+  if (!source) {
     return "";
   }
+  if (similarLinks) {
+    const segmentSimilar = similarLinks
+      .slice(0, PRIMARY_SIMILAR_LIMIT)
+      .map((track) => `${track.id}:${track.score.toFixed(4)}`)
+      .join(",");
+    return `${source.id}:segment:${highlightedLinkId ?? ""}:${segmentSimilar}`;
+  }
   const tracksById = new Map(tracks.map((track) => [track.id, track]));
-  const similar = selected.similar
+  const similar = source.similar
     .slice(0, PRIMARY_SIMILAR_LIMIT)
     .map((track) => `${track.id}:${track.score.toFixed(4)}`)
     .join(",");
-  const primaryTracks = selected.similar
+  const primaryTracks = source.similar
     .slice(0, PRIMARY_SIMILAR_LIMIT)
     .map((track) => tracksById.get(track.id))
     .filter((track): track is Track => Boolean(track));
-  const secondary = createSecondarySimilarityLinks(selected, primaryTracks, tracksById)
+  const secondary = createSecondarySimilarityLinks(source, primaryTracks, tracksById)
     .map((link) => `${link.source.id}>${link.target.id}`)
     .join(",");
-  return `${selected.id}:${similar}:${secondary}`;
+  return `${source.id}:${highlightedLinkId ?? ""}:${similar}:${secondary}`;
 }
 
 function formatCoord(value: number | null): string {
-  return value === null ? "" : value.toFixed(4);
+  return value == null ? "" : value.toFixed(4);
 }
 
 function createScoreSprite(score: number): THREE.Sprite {
@@ -538,7 +609,7 @@ function createScoreSprite(score: number): THREE.Sprite {
 function createSimilarityLine(
   start: THREE.Vector3,
   end: THREE.Vector3,
-  dashed: boolean
+  style: SimilarityLineStyle
 ): THREE.Group {
   const direction = end.clone().sub(start);
   const length = direction.length();
@@ -547,16 +618,17 @@ function createSimilarityLine(
     return group;
   }
 
-  const radius = dashed ? SECONDARY_LINE_RADIUS : PRIMARY_LINE_RADIUS;
+  const radius =
+    style === "next" ? NEXT_LINE_RADIUS : style === "secondary" ? SECONDARY_LINE_RADIUS : PRIMARY_LINE_RADIUS;
   const geometry = createLineGeometry(length, radius);
-  const material = createShimmerLineMaterial(dashed);
+  const material = createShimmerLineMaterial(style);
   const mesh = new THREE.Mesh(geometry, material);
   mesh.position.copy(start).addScaledVector(direction, 0.5);
   mesh.quaternion.setFromUnitVectors(
     new THREE.Vector3(0, 1, 0),
     direction.clone().normalize()
   );
-  mesh.renderOrder = dashed ? 0 : 1;
+  mesh.renderOrder = style === "next" ? 2 : style === "secondary" ? 0 : 1;
   group.add(mesh);
 
   return group;
@@ -573,13 +645,15 @@ function createLineGeometry(length: number, radius: number): THREE.CylinderGeome
   return geometry;
 }
 
-function createShimmerLineMaterial(dashed: boolean): ShimmerLineMaterial {
+function createShimmerLineMaterial(style: SimilarityLineStyle): ShimmerLineMaterial {
+  const dashed = style === "secondary";
+  const isNext = style === "next";
   return new THREE.ShaderMaterial({
     uniforms: {
       uTime: { value: 0 },
-      uBaseColor: { value: new THREE.Color(dashed ? "#a8a8a8" : "#d7d7d7") },
-      uShimmerColor: { value: new THREE.Color("#ffffff") },
-      uOpacity: { value: dashed ? 0.42 : 0.78 },
+      uBaseColor: { value: new THREE.Color(isNext ? "#ffd84a" : dashed ? "#a8a8a8" : "#d7d7d7") },
+      uShimmerColor: { value: new THREE.Color(isNext ? "#fff4a8" : "#ffffff") },
+      uOpacity: { value: isNext ? 0.96 : dashed ? 0.42 : 0.78 },
       uDashed: { value: dashed ? 1 : 0 }
     },
     vertexShader: `

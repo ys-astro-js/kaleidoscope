@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from app import database
 from app.audio import cached_art_thumbnail, save_upload, title_from_filename, write_art_or_placeholder
 from app.config import ensure_data_dirs, get_settings
-from app.models import FeedbackLabel, FeedbackRequest, Track
+from app.models import FeedbackLabel, FeedbackRequest, SimilarSegment, Track
 from app.service import TrackService
 from app.vector_store import VectorStore
 
@@ -65,12 +65,34 @@ async def upload_track(upload: UploadFile, background_tasks: BackgroundTasks) ->
         y=row["y"],
         z=row["z"],
         cluster=row["cluster"],
+        segment_count=0,
     )
 
 
 @app.get("/api/tracks", response_model=list[Track])
 def list_tracks() -> list[Track]:
     return service.list_tracks()
+
+
+@app.get("/api/tracks/{track_id}/segments/{segment_index}/similar", response_model=list[SimilarSegment])
+def similar_segments(track_id: str, segment_index: int, limit: int = 5) -> list[SimilarSegment]:
+    row = database.get_track(conn, track_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Track not found")
+    if row["status"] != "ready":
+        raise HTTPException(status_code=400, detail="Track is not ready")
+    if segment_index < 0:
+        raise HTTPException(status_code=400, detail="Segment index must be non-negative")
+
+    return [
+        SimilarSegment(
+            id=str(item["id"]),
+            score=float(item["score"]),
+            segment_index=int(item["segment_index"]),
+            start_seconds=float(item["start_seconds"]),
+        )
+        for item in vectors.similar_segments(track_id, segment_index, limit=limit)
+    ]
 
 
 @app.post("/api/feedback", status_code=204)

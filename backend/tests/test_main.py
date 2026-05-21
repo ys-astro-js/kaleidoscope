@@ -23,6 +23,18 @@ class FakeService:
         )
 
 
+class FakeVectors:
+    def similar_segments(self, track_id: str, segment_index: int, *, limit: int):
+        return [
+            {
+                "id": "candidate",
+                "score": 0.92,
+                "segment_index": 3,
+                "start_seconds": 45.0,
+            }
+        ]
+
+
 def insert_ready_track(conn, tmp_path: Path, track_id: str) -> None:
     database.insert_track(
         conn,
@@ -59,6 +71,26 @@ def test_submit_feedback_records_valid_event(monkeypatch, tmp_path: Path) -> Non
             "query_track_id": "query",
             "candidate_track_id": "candidate",
             "label": "similar",
+        }
+    ]
+
+
+def test_similar_segments_returns_segment_matches(monkeypatch, tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    insert_ready_track(conn, tmp_path, "query")
+    monkeypatch.setattr(app_main, "conn", conn)
+    monkeypatch.setattr(app_main, "vectors", FakeVectors())
+
+    response = TestClient(app_main.app).get("/api/tracks/query/segments/2/similar")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": "candidate",
+            "score": 0.92,
+            "segment_index": 3,
+            "start_seconds": 45.0,
         }
     ]
 

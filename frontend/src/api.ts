@@ -1,4 +1,4 @@
-import type { FeedbackLabel, Track } from "./types";
+import type { FeedbackLabel, SimilarSegment, Track } from "./types";
 
 export async function fetchTracks(): Promise<Track[]> {
   const response = await fetch("/api/tracks");
@@ -40,6 +40,22 @@ export async function deleteAllTracks(): Promise<void> {
   if (!response.ok) {
     throw new Error("Failed to delete tracks");
   }
+}
+
+export async function fetchSimilarSegments(
+  trackId: string,
+  segmentIndex: number,
+  signal?: AbortSignal,
+  limit?: number
+): Promise<SimilarSegment[]> {
+  const query = limit === undefined ? "" : `?limit=${encodeURIComponent(limit)}`;
+  const response = await fetch(`/api/tracks/${trackId}/segments/${segmentIndex}/similar${query}`, {
+    signal
+  });
+  if (!response.ok) {
+    throw new Error("Failed to fetch similar segments");
+  }
+  return response.json();
 }
 
 export async function submitFeedback(
