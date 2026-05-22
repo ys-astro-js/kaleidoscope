@@ -29,6 +29,7 @@ class Track(BaseModel):
     filename: str
     title: str
     artist: str | None = None
+    album: str | None = None
     status: TrackStatus
     error: str | None = None
     x: float | None = None

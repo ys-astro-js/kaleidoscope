@@ -50,6 +50,7 @@ class TrackService:
                     filename=row["filename"],
                     title=row["title"],
                     artist=row["artist"],
+                    album=row["album"],
                     status=row["status"],
                     error=row["error"],
                     x=row["x"],
@@ -102,7 +103,7 @@ class TrackService:
 
         try:
             database.update_track(self.conn, track_id, status="processing")
-            artist, art_bytes = extract_metadata(Path(row["audio_path"]))
+            artist, album, art_bytes = extract_metadata(Path(row["audio_path"]))
             art_path = write_art_or_placeholder(track_id, art_bytes, self.settings.art_dir)
             model_audio_path = normalize_audio_for_model(
                 Path(row["audio_path"]),
@@ -123,6 +124,7 @@ class TrackService:
                 track_id,
                 status="ready",
                 artist=artist,
+                album=album,
                 art_path=art_path,
             )
             self.recompute_layout()

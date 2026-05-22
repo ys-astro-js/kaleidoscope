@@ -71,6 +71,7 @@ export function useAudioPlayback({
   const isCrossfadingRef = useRef(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [currentDuration, setCurrentDuration] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
 
   const getAudio = useCallback((deck: AudioDeck): HTMLAudioElement | null =>
     deck === "primary" ? primaryAudioRef.current : secondaryAudioRef.current, []);
@@ -78,7 +79,9 @@ export function useAudioPlayback({
   const activateDeck = useCallback((deck: AudioDeck) => {
     activeDeckRef.current = deck;
     setActiveDeck(deck);
-  }, []);
+    const audio = getAudio(deck);
+    setIsPlaying(Boolean(audio && !audio.paused));
+  }, [getAudio]);
 
   const cancelFade = useCallback(() => {
     if (fadeFrameRef.current !== null) {
@@ -100,7 +103,32 @@ export function useAudioPlayback({
     cancelFade();
     pauseAudio(primaryAudioRef.current);
     pauseAudio(secondaryAudioRef.current);
+    setIsPlaying(false);
   }, [cancelFade]);
+
+  useEffect(() => {
+    const syncPlaybackState = () => {
+      const audio = getAudio(activeDeckRef.current);
+      setIsPlaying(Boolean(audio && !audio.paused));
+    };
+    const primary = primaryAudioRef.current;
+    const secondary = secondaryAudioRef.current;
+    primary?.addEventListener("play", syncPlaybackState);
+    primary?.addEventListener("pause", syncPlaybackState);
+    primary?.addEventListener("ended", syncPlaybackState);
+    secondary?.addEventListener("play", syncPlaybackState);
+    secondary?.addEventListener("pause", syncPlaybackState);
+    secondary?.addEventListener("ended", syncPlaybackState);
+    syncPlaybackState();
+    return () => {
+      primary?.removeEventListener("play", syncPlaybackState);
+      primary?.removeEventListener("pause", syncPlaybackState);
+      primary?.removeEventListener("ended", syncPlaybackState);
+      secondary?.removeEventListener("play", syncPlaybackState);
+      secondary?.removeEventListener("pause", syncPlaybackState);
+      secondary?.removeEventListener("ended", syncPlaybackState);
+    };
+  }, [getAudio]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -150,7 +178,10 @@ export function useAudioPlayback({
       audio.currentTime = nextCurrentTime;
       setCurrentTime(nextCurrentTime);
       setCurrentDuration(audio.duration);
-      void audio.play();
+      void audio
+        .play()
+        .then(() => setIsPlaying(true))
+        .catch(() => setIsPlaying(false));
     };
   }, [
     cancelFade,
@@ -325,11 +356,39 @@ export function useAudioPlayback({
     }
   }, [currentDuration]);
 
+  const togglePlayback = useCallback(() => {
+    const audio = getAudio(activeDeckRef.current);
+    if (!audio || !audio.src) {
+      return;
+    }
+    if (audio.paused) {
+      void audio
+        .play()
+        .then(() => setIsPlaying(true))
+        .catch(() => setIsPlaying(false));
+      return;
+    }
+    audio.pause();
+    setIsPlaying(false);
+  }, [getAudio]);
+
+  const seekTo = useCallback((seconds: number) => {
+    const audio = getAudio(activeDeckRef.current);
+    if (!audio) {
+      return;
+    }
+    const duration = Number.isFinite(audio.duration) ? audio.duration : currentDuration;
+    const clamped = Math.min(Math.max(0, seconds), Math.max(0, duration));
+    audio.currentTime = clamped;
+    setCurrentTime(clamped);
+  }, [currentDuration, getAudio]);
+
   return {
     activeDeck,
     activeDeckRef,
     currentTime,
     currentDuration,
+    isPlaying,
     setCurrentTime,
     primaryAudioRef,
     secondaryAudioRef,
@@ -338,6 +397,8 @@ export function useAudioPlayback({
     pauseAllAudio,
     playTrack,
     crossfadeToTrack,
+    togglePlayback,
+    seekTo,
     handleTimeUpdate,
   };
 }

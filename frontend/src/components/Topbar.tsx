@@ -1,18 +1,13 @@
 import { useRef } from "react";
-import { CloudUpload, Repeat2, Trash2 } from "lucide-react";
-import type { SimilarityMode, Track, ViewMode } from "../types";
+import { CloudUpload, Trash2 } from "lucide-react";
+import type { Track, ViewMode } from "../types";
 
 type Props = {
   tracksCount: number;
   activeTracks: Track[];
   message: string;
   viewMode: ViewMode;
-  similarityMode: SimilarityMode;
-  isAutoplayActive: boolean;
   onViewModeChange: (mode: ViewMode) => void;
-  onTrackModeSelect: () => void;
-  onSegmentModeSelect: () => void;
-  onAutoplayToggle: () => void;
   onClearTracks: () => void;
   onFilesSelected: (files: FileList) => void;
 };
@@ -22,12 +17,7 @@ export function Topbar({
   activeTracks,
   message,
   viewMode,
-  similarityMode,
-  isAutoplayActive,
   onViewModeChange,
-  onTrackModeSelect,
-  onSegmentModeSelect,
-  onAutoplayToggle,
   onClearTracks,
   onFilesSelected,
 }: Props) {
@@ -74,34 +64,6 @@ export function Topbar({
             3D
           </button>
         </div>
-        <div className="mode-toggle" role="group" aria-label="similarity mode">
-          <button
-            type="button"
-            className={similarityMode === "track" ? "active" : ""}
-            onClick={onTrackModeSelect}
-          >
-            Track
-          </button>
-          <button
-            type="button"
-            className={similarityMode === "segment" ? "active" : ""}
-            onClick={onSegmentModeSelect}
-          >
-            Segment
-          </button>
-        </div>
-        <button
-          type="button"
-          className={
-            isAutoplayActive
-              ? "autoplay-toggle with-icon active"
-              : "autoplay-toggle with-icon"
-          }
-          onClick={onAutoplayToggle}
-        >
-          <Repeat2 aria-hidden="true" size={16} strokeWidth={2.3} />
-          Auto
-        </button>
       </div>
       <input
         ref={fileInputRef}

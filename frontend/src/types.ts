@@ -18,6 +18,7 @@ export type Track = {
   filename: string;
   title: string;
   artist: string | null;
+  album: string | null;
   status: TrackStatus;
   error: string | null;
   x: number | null;

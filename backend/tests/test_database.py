@@ -24,6 +24,30 @@ def test_insert_track_preserves_multibyte_filename(tmp_path: Path) -> None:
     assert row is not None
     assert row["filename"] == JAPANESE_FILENAME
     assert row["title"] == JAPANESE_TITLE
+    assert row["album"] is None
+
+
+def test_init_db_adds_album_to_existing_tracks_table(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    conn.execute(
+        """
+        CREATE TABLE tracks (
+            id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            title TEXT NOT NULL,
+            artist TEXT,
+            audio_path TEXT NOT NULL,
+            art_path TEXT NOT NULL,
+            status TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+    database.init_db(conn)
+
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
+    assert "album" in columns
 
 
 def test_feedback_events_are_removed_with_track(tmp_path: Path) -> None:

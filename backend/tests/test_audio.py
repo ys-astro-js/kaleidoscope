@@ -5,6 +5,7 @@ import subprocess
 from app.audio import (
     cached_art_thumbnail,
     create_placeholder,
+    extract_metadata,
     normalize_audio_for_model,
     save_upload,
     title_from_filename,
@@ -81,3 +82,21 @@ def test_normalize_audio_for_model_uses_ffmpeg(monkeypatch, tmp_path: Path) -> N
     assert "1" in calls[0]
     assert "-ar" in calls[0]
     assert "24000" in calls[0]
+
+
+def test_extract_metadata_reads_album(monkeypatch, tmp_path: Path) -> None:
+    class FakeAudio:
+        tags = {
+            "TPE1": ["Artist"],
+            "TALB": ["Album"],
+        }
+
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"audio")
+    monkeypatch.setattr("app.audio.MutagenFile", lambda path: FakeAudio())
+
+    artist, album, art = extract_metadata(audio_path)
+
+    assert artist == "Artist"
+    assert album == "Album"
+    assert art is None

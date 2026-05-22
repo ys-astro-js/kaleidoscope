@@ -36,6 +36,7 @@ async def upload_track(
         filename=row["filename"],
         title=row["title"],
         artist=row["artist"],
+        album=row["album"],
         status=row["status"],
         error=row["error"],
         x=row["x"],

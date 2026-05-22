@@ -56,22 +56,25 @@ def normalize_audio_for_model(input_path: Path, target_path: Path, sample_rate: 
     return target_path
 
 
-def extract_metadata(audio_path: Path) -> tuple[str | None, bytes | None]:
+def extract_metadata(audio_path: Path) -> tuple[str | None, str | None, bytes | None]:
     audio = MutagenFile(audio_path)
     if audio is None or audio.tags is None:
-        return None, None
+        return None, None, None
 
     artist = None
+    album = None
     art = None
 
     for key, value in audio.tags.items():
         normalized = str(key).lower()
         if artist is None and normalized in {"artist", "\xa9art", "tpe1"}:
             artist = _first_text(value)
+        if album is None and normalized in {"album", "\xa9alb", "talb"}:
+            album = _first_text(value)
         if art is None and (normalized.startswith("apic") or normalized in {"covr", "metadata_block_picture"}):
             art = _extract_art_bytes(value)
 
-    return artist, art
+    return artist, album, art
 
 
 def write_art_or_placeholder(track_id: str, art_bytes: bytes | None, art_dir: Path) -> Path:

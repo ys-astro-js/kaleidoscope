@@ -25,6 +25,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             filename TEXT NOT NULL,
             title TEXT NOT NULL,
             artist TEXT,
+            album TEXT,
             audio_path TEXT NOT NULL,
             art_path TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -39,6 +40,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     _ensure_track_column(conn, "cluster", "INTEGER")
+    _ensure_track_column(conn, "album", "TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS feedback_events (
@@ -91,6 +93,7 @@ def update_track(
     *,
     status: TrackStatus | None = None,
     artist: str | None = None,
+    album: str | None = None,
     art_path: Path | None = None,
     error: str | None = None,
     coords: tuple[float, float, float] | None = None,
@@ -103,6 +106,9 @@ def update_track(
     if artist is not None:
         fields.append("artist = ?")
         values.append(artist)
+    if album is not None:
+        fields.append("album = ?")
+        values.append(album)
     if art_path is not None:
         fields.append("art_path = ?")
         values.append(str(art_path))

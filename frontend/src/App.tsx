@@ -18,6 +18,11 @@ import { useTrackLibrary } from "./hooks/useTrackLibrary";
 import MusicScene from "./MusicScene";
 import type { FeedbackLabel, SimilarityMode, Track, ViewMode } from "./types";
 
+type PlaybackVisit = {
+  trackId: string;
+  startSeconds: number;
+};
+
 export default function App() {
   const [selected, setSelected] = useState<Track | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -27,6 +32,7 @@ export default function App() {
   const [segmentAutoplay, setSegmentAutoplay] = useState(false);
   const [routePreview, setRoutePreview] = useState<RoutePreview | null>(null);
   const [trackAutoplayPreview, setTrackAutoplayPreview] = useState<TrackAutoplayPreview | null>(null);
+  const [playbackHistory, setPlaybackHistory] = useState<PlaybackVisit[]>([]);
   const tracksRef = useRef<Track[]>([]);
   const previousSimilarityModeRef = useRef<SimilarityMode>(similarityMode);
 
@@ -74,6 +80,7 @@ export default function App() {
     activeDeckRef,
     currentTime,
     currentDuration,
+    isPlaying,
     setCurrentTime,
     primaryAudioRef,
     secondaryAudioRef,
@@ -82,6 +89,8 @@ export default function App() {
     pauseAllAudio,
     playTrack,
     crossfadeToTrack,
+    togglePlayback,
+    seekTo,
     handleTimeUpdate,
   } = useAudioPlayback({
     similarityMode,
@@ -120,6 +129,35 @@ export default function App() {
     segmentAutoplay,
   });
 
+  const pushPlaybackHistory = useCallback(() => {
+    if (!selected) {
+      return;
+    }
+    const audio = getAudio(activeDeckRef.current);
+    const startSeconds = audio?.currentTime ?? currentTime;
+    setPlaybackHistory((history) => {
+      const last = history.at(-1);
+      if (last?.trackId === selected.id && Math.abs(last.startSeconds - startSeconds) < 1) {
+        return history;
+      }
+      return [...history, { trackId: selected.id, startSeconds }].slice(-50);
+    });
+  }, [activeDeckRef, currentTime, getAudio, selected]);
+
+  const playTrackWithHistory = useCallback((track: Track, startSeconds?: number) => {
+    pushPlaybackHistory();
+    playTrack(track, startSeconds);
+  }, [playTrack, pushPlaybackHistory]);
+
+  const crossfadeToTrackWithHistory = useCallback((
+    track: Track,
+    startSeconds: number,
+    options?: { onCommit?: () => void; updateSegmentRoute?: boolean }
+  ) => {
+    pushPlaybackHistory();
+    crossfadeToTrack(track, startSeconds, options);
+  }, [crossfadeToTrack, pushPlaybackHistory]);
+
   useAutoplayRouting({
     selected,
     selectedId,
@@ -148,7 +186,7 @@ export default function App() {
     recordTrackAutoplayVisit,
     chooseAutoplayMatchFromHistory,
     buildRoutePreviewFromHistory,
-    crossfadeToTrack,
+    crossfadeToTrack: crossfadeToTrackWithHistory,
   });
 
   useEffect(() => {
@@ -257,6 +295,37 @@ export default function App() {
     void removeTrack(track);
   }, [removeTrack]);
 
+  const playPrevious = useCallback(() => {
+    const previous = playbackHistory.at(-1);
+    if (!previous) {
+      seekTo(0);
+      return;
+    }
+    const track = tracks.find((candidate) => candidate.id === previous.trackId);
+    setPlaybackHistory((history) => history.slice(0, -1));
+    if (track) {
+      playTrack(track, previous.startSeconds);
+    }
+  }, [playTrack, playbackHistory, seekTo, tracks]);
+
+  const playNext = useCallback(() => {
+    if (similarityMode === "track") {
+      const target = similarTracks[0]?.track;
+      if (target) {
+        playTrackWithHistory(target);
+      }
+      return;
+    }
+
+    const target = segmentSimilarTracks[0];
+    if (target) {
+      playTrackWithHistory(target.track, target.startSeconds);
+    }
+  }, [playTrackWithHistory, segmentSimilarTracks, similarityMode, similarTracks]);
+
+  const hasNext =
+    similarityMode === "track" ? similarTracks.length > 0 : segmentSimilarTracks.length > 0;
+
   return (
     <main
       className={isDragging ? "app dragging" : "app"}
@@ -269,12 +338,7 @@ export default function App() {
         activeTracks={activeTracks}
         message={message}
         viewMode={viewMode}
-        similarityMode={similarityMode}
-        isAutoplayActive={similarityMode === "track" ? trackAutoplay : segmentAutoplay}
         onViewModeChange={setViewMode}
-        onTrackModeSelect={selectTrackMode}
-        onSegmentModeSelect={selectSegmentMode}
-        onAutoplayToggle={toggleAutoplay}
         onClearTracks={clearTracks}
         onFilesSelected={selectFiles}
       />
@@ -293,7 +357,7 @@ export default function App() {
               : null
         }
         focusedTrackIds={focusedTrackIds}
-        onSelect={playTrack}
+        onSelect={playTrackWithHistory}
       />
 
       {selected && similarityMode === "track" ? (
@@ -307,7 +371,7 @@ export default function App() {
         <SegmentFeedbackPanel
           displaySegmentIndex={displaySegmentIndex}
           entries={segmentSimilarTracks}
-          onPlayTrack={playTrack}
+          onPlayTrack={playTrackWithHistory}
         />
       ) : null}
 
@@ -324,6 +388,19 @@ export default function App() {
         activeDeck={activeDeck}
         primaryAudioRef={primaryAudioRef}
         secondaryAudioRef={secondaryAudioRef}
+        similarityMode={similarityMode}
+        isAutoplayActive={similarityMode === "track" ? trackAutoplay : segmentAutoplay}
+        isPlaying={isPlaying}
+        currentTime={currentTime}
+        currentDuration={currentDuration}
+        canPlayNext={hasNext}
+        onTrackModeSelect={selectTrackMode}
+        onSegmentModeSelect={selectSegmentMode}
+        onPrevious={playPrevious}
+        onPlayPause={togglePlayback}
+        onNext={playNext}
+        onAutoplayToggle={toggleAutoplay}
+        onSeek={seekTo}
         onDelete={deleteSelectedTrack}
         onTimeUpdate={handleTimeUpdate}
       />
