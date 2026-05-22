@@ -23,3 +23,4 @@ frontend/vite.config.js
 frontend/vite.config.d.ts
 
 .pnpm-store/
+.agents/*

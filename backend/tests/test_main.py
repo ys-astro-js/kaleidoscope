@@ -4,11 +4,16 @@ from fastapi.testclient import TestClient
 
 from app import database
 from app import main as app_main
+from app.config import Settings
+from app.context import AppContext
 
 
 class FakeService:
-    def __init__(self) -> None:
+    def __init__(self, *, delete_result: bool = True) -> None:
         self.calls = []
+        self.deleted_track_ids = []
+        self.delete_all_calls = 0
+        self.delete_result = delete_result
 
     def recompute_layout(self) -> None:
         pass
@@ -21,6 +26,13 @@ class FakeService:
                 "label": label,
             }
         )
+
+    def delete_track(self, track_id: str) -> bool:
+        self.deleted_track_ids.append(track_id)
+        return self.delete_result
+
+    def delete_all_tracks(self) -> None:
+        self.delete_all_calls += 1
 
 
 class FakeVectors:
@@ -35,28 +47,48 @@ class FakeVectors:
         ]
 
 
-def insert_ready_track(conn, tmp_path: Path, track_id: str) -> None:
+def make_client(
+    conn,
+    tmp_path: Path,
+    *,
+    service: FakeService | None = None,
+    vectors: FakeVectors | None = None,
+) -> TestClient:
+    settings = Settings(data_dir=tmp_path)
+    context = AppContext(
+        settings=settings,
+        conn=conn,
+        vectors=vectors or FakeVectors(),
+        service=service or FakeService(),
+    )
+    return TestClient(app_main.create_app(context))
+
+
+def insert_ready_track(conn, tmp_path: Path, track_id: str, audio_bytes: bytes = b"audio") -> None:
+    audio_path = tmp_path / f"{track_id}.mp3"
+    art_path = tmp_path / f"{track_id}.png"
+    audio_path.write_bytes(audio_bytes)
+    art_path.write_bytes(b"art")
     database.insert_track(
         conn,
         track_id=track_id,
-        filename=f"{track_id}.mp3",
+        filename=audio_path.name,
         title=track_id,
-        audio_path=tmp_path / f"{track_id}.mp3",
-        art_path=tmp_path / f"{track_id}.png",
+        audio_path=audio_path,
+        art_path=art_path,
     )
     database.update_track(conn, track_id, status="ready")
 
 
-def test_submit_feedback_records_valid_event(monkeypatch, tmp_path: Path) -> None:
+def test_submit_feedback_records_valid_event(tmp_path: Path) -> None:
     conn = database.connect(tmp_path / "app.sqlite")
     database.init_db(conn)
     insert_ready_track(conn, tmp_path, "query")
     insert_ready_track(conn, tmp_path, "candidate")
     service = FakeService()
-    monkeypatch.setattr(app_main, "conn", conn)
-    monkeypatch.setattr(app_main, "service", service)
+    client = make_client(conn, tmp_path, service=service)
 
-    response = TestClient(app_main.app).post(
+    response = client.post(
         "/api/feedback",
         json={
             "query_track_id": "query",
@@ -75,14 +107,13 @@ def test_submit_feedback_records_valid_event(monkeypatch, tmp_path: Path) -> Non
     ]
 
 
-def test_similar_segments_returns_segment_matches(monkeypatch, tmp_path: Path) -> None:
+def test_similar_segments_returns_segment_matches(tmp_path: Path) -> None:
     conn = database.connect(tmp_path / "app.sqlite")
     database.init_db(conn)
     insert_ready_track(conn, tmp_path, "query")
-    monkeypatch.setattr(app_main, "conn", conn)
-    monkeypatch.setattr(app_main, "vectors", FakeVectors())
+    client = make_client(conn, tmp_path, vectors=FakeVectors())
 
-    response = TestClient(app_main.app).get("/api/tracks/query/segments/2/similar")
+    response = client.get("/api/tracks/query/segments/2/similar")
 
     assert response.status_code == 200
     assert response.json() == [
@@ -95,12 +126,12 @@ def test_similar_segments_returns_segment_matches(monkeypatch, tmp_path: Path) -
     ]
 
 
-def test_submit_feedback_rejects_bad_label(monkeypatch, tmp_path: Path) -> None:
+def test_submit_feedback_rejects_bad_label(tmp_path: Path) -> None:
     conn = database.connect(tmp_path / "app.sqlite")
     database.init_db(conn)
-    monkeypatch.setattr(app_main, "conn", conn)
+    client = make_client(conn, tmp_path)
 
-    response = TestClient(app_main.app).post(
+    response = client.post(
         "/api/feedback",
         json={
             "query_track_id": "query",
@@ -112,12 +143,12 @@ def test_submit_feedback_rejects_bad_label(monkeypatch, tmp_path: Path) -> None:
     assert response.status_code == 400
 
 
-def test_submit_feedback_rejects_missing_track(monkeypatch, tmp_path: Path) -> None:
+def test_submit_feedback_rejects_missing_track(tmp_path: Path) -> None:
     conn = database.connect(tmp_path / "app.sqlite")
     database.init_db(conn)
-    monkeypatch.setattr(app_main, "conn", conn)
+    client = make_client(conn, tmp_path)
 
-    response = TestClient(app_main.app).post(
+    response = client.post(
         "/api/feedback",
         json={
             "query_track_id": "query",
@@ -127,3 +158,64 @@ def test_submit_feedback_rejects_missing_track(monkeypatch, tmp_path: Path) -> N
     )
 
     assert response.status_code == 404
+
+
+def test_delete_track_calls_service(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    service = FakeService()
+    client = make_client(conn, tmp_path, service=service)
+
+    response = client.delete("/api/tracks/query")
+
+    assert response.status_code == 204
+    assert service.deleted_track_ids == ["query"]
+
+
+def test_delete_track_returns_404_when_service_cannot_delete(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    service = FakeService(delete_result=False)
+    client = make_client(conn, tmp_path, service=service)
+
+    response = client.delete("/api/tracks/missing")
+
+    assert response.status_code == 404
+    assert service.deleted_track_ids == ["missing"]
+
+
+def test_delete_all_tracks_requires_confirm(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    service = FakeService()
+    client = make_client(conn, tmp_path, service=service)
+
+    response = client.delete("/api/tracks")
+
+    assert response.status_code == 400
+    assert service.delete_all_calls == 0
+
+
+def test_delete_all_tracks_calls_service_when_confirmed(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    service = FakeService()
+    client = make_client(conn, tmp_path, service=service)
+
+    response = client.delete("/api/tracks?confirm=true")
+
+    assert response.status_code == 204
+    assert service.delete_all_calls == 1
+
+
+def test_audio_range_response_returns_partial_content(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    insert_ready_track(conn, tmp_path, "query", audio_bytes=b"audio")
+    client = make_client(conn, tmp_path)
+
+    response = client.get("/api/tracks/query/audio", headers={"Range": "bytes=1-3"})
+
+    assert response.status_code == 206
+    assert response.content == b"udi"
+    assert response.headers["content-range"] == "bytes 1-3/5"

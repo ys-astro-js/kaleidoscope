@@ -31,6 +31,9 @@ dev = [
 [tool.uv]
 package = false
 
+[tool.fastapi]
+entrypoint = "app.main:app"
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }

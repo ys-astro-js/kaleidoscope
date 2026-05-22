@@ -179,3 +179,31 @@ class TrackService:
             segment_semantic=float(row["segment_weight"]),
             cover_chroma=float(row["chroma_weight"]),
         )
+
+    def delete_all_tracks(self) -> None:
+        rows = list(database.list_tracks(self.conn))
+        for row in rows:
+            self._delete_track_assets(row)
+        self.retrain_feedback_weights()
+        self.recompute_layout()
+
+    def delete_track(self, track_id: str) -> bool:
+        row = database.get_track(self.conn, track_id)
+        if row is None:
+            return False
+        self._delete_track_assets(row)
+        self.retrain_feedback_weights()
+        self.recompute_layout()
+        return True
+
+    def _delete_track_assets(self, row) -> None:
+        track_id = row["id"]
+        database.delete_track(self.conn, track_id)
+        self.vectors.delete(track_id)
+        for path_key in ("audio_path", "art_path"):
+            path = Path(row[path_key])
+            if path.exists():
+                path.unlink()
+        model_audio_path = self.settings.audio_dir / f"{track_id}.model.wav"
+        if model_audio_path.exists():
+            model_audio_path.unlink()
