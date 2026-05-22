@@ -4,7 +4,7 @@ export const SEGMENT_HOP_SECONDS = 15;
 export const SEGMENT_WINDOW_SECONDS = 30;
 export const CROSSFADE_SECONDS = 4;
 export const TRACK_AUTOPLAY_HIGHLIGHT_SECONDS = 5;
-export const AUTOPLAY_TRIGGER_SECONDS = SEGMENT_HOP_SECONDS - CROSSFADE_SECONDS;
+export const AUTOPLAY_TRIGGER_SECONDS = SEGMENT_WINDOW_SECONDS - CROSSFADE_SECONDS;
 export const AUTOPLAY_HISTORY_LIMIT = 12;
 
 export type SegmentVisit = {
@@ -33,6 +33,10 @@ export type TrackAutoplayCandidate = SegmentVisit & {
 
 export function segmentIndexForTime(timeSeconds: number): number {
   return Math.max(0, Math.floor(timeSeconds / SEGMENT_HOP_SECONDS));
+}
+
+export function segmentWindowIndexForTime(timeSeconds: number): number {
+  return segmentIndexForTime(Math.floor(Math.max(0, timeSeconds) / SEGMENT_WINDOW_SECONDS) * SEGMENT_WINDOW_SECONDS);
 }
 
 export function withHistoryVisit(history: SegmentVisit[], visit: SegmentVisit): SegmentVisit[] {

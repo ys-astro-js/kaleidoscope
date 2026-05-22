@@ -23,6 +23,11 @@ type PlaybackVisit = {
   startSeconds: number;
 };
 
+type FeedbackNotice = {
+  id: number;
+  label: FeedbackLabel;
+};
+
 export default function App() {
   const [selected, setSelected] = useState<Track | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -33,7 +38,9 @@ export default function App() {
   const [routePreview, setRoutePreview] = useState<RoutePreview | null>(null);
   const [trackAutoplayPreview, setTrackAutoplayPreview] = useState<TrackAutoplayPreview | null>(null);
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackVisit[]>([]);
+  const [feedbackNotice, setFeedbackNotice] = useState<FeedbackNotice | null>(null);
   const tracksRef = useRef<Track[]>([]);
+  const feedbackNoticeIdRef = useRef(0);
   const previousSimilarityModeRef = useRef<SimilarityMode>(similarityMode);
 
   const syncSelectedTrack = useCallback((nextTracks: Track[]) => {
@@ -50,7 +57,6 @@ export default function App() {
     activeTracks,
     visibleFailedTracks,
     message,
-    setMessage,
     loadTracks,
     handleFiles,
     deleteTrackFromLibrary,
@@ -208,9 +214,14 @@ export default function App() {
       return;
     }
     await submitFeedback(selected.id, candidate.id, label);
-    setMessage("Feedback saved");
+    feedbackNoticeIdRef.current += 1;
+    setFeedbackNotice({ id: feedbackNoticeIdRef.current, label });
     await loadTracks();
-  }, [loadTracks, selected, setMessage]);
+  }, [loadTracks, selected]);
+
+  const clearFeedbackNotice = useCallback((id: number) => {
+    setFeedbackNotice((current) => current?.id === id ? null : current);
+  }, []);
 
   const removeTrack = useCallback(async (track: Track) => {
     await deleteTrackFromLibrary(track);
@@ -394,6 +405,7 @@ export default function App() {
         currentTime={currentTime}
         currentDuration={currentDuration}
         canPlayNext={hasNext}
+        feedbackNotice={feedbackNotice}
         onTrackModeSelect={selectTrackMode}
         onSegmentModeSelect={selectSegmentMode}
         onPrevious={playPrevious}
@@ -403,6 +415,7 @@ export default function App() {
         onSeek={seekTo}
         onDelete={deleteSelectedTrack}
         onTimeUpdate={handleTimeUpdate}
+        onFeedbackNoticeDone={clearFeedbackNotice}
       />
     </main>
   );

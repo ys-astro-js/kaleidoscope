@@ -1,5 +1,13 @@
 import { useMemo } from "react";
-import { TRACK_AUTOPLAY_HIGHLIGHT_SECONDS, segmentIndexForTime, type RoutePreview, type TrackAutoplayPreview } from "../autoplay";
+import {
+  SEGMENT_HOP_SECONDS,
+  SEGMENT_WINDOW_SECONDS,
+  TRACK_AUTOPLAY_HIGHLIGHT_SECONDS,
+  segmentIndexForTime,
+  segmentWindowIndexForTime,
+  type RoutePreview,
+  type TrackAutoplayPreview,
+} from "../autoplay";
 import type { SimilarTrackEntry } from "../components/TrackFeedbackPanel";
 import type { SegmentTrackEntry } from "../components/SegmentFeedbackPanel";
 import type { SimilarityMode, Track } from "../types";
@@ -28,8 +36,24 @@ export function useAppDerivedState({
   const selectedId = selected?.id ?? null;
   const selectedSegmentCount = selected?.segment_count ?? 0;
   const currentSegmentIndex = useMemo(
-    () => segmentIndexForTime(currentTime),
-    [currentTime]
+    () => {
+      const index =
+        similarityMode === "segment"
+          ? segmentWindowIndexForTime(currentTime)
+          : segmentIndexForTime(currentTime);
+      if (
+        similarityMode === "segment" &&
+        routePreview?.trackId === selectedId &&
+        currentTime < routePreview.segmentIndex * SEGMENT_HOP_SECONDS + SEGMENT_WINDOW_SECONDS
+      ) {
+        return routePreview.segmentIndex;
+      }
+      if (selectedSegmentCount <= 0) {
+        return index;
+      }
+      return Math.min(index, selectedSegmentCount - 1);
+    },
+    [currentTime, routePreview, selectedId, selectedSegmentCount, similarityMode]
   );
 
   const similarTracks = useMemo<SimilarTrackEntry[]>(() => {

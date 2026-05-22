@@ -1,4 +1,3 @@
-import { Play } from "lucide-react";
 import { artUrl } from "../api";
 import type { Track } from "../types";
 
@@ -25,26 +24,20 @@ export function SegmentFeedbackPanel({
   }
 
   return (
-    <section className="feedback-panel segment-panel" aria-label="similar segments">
-      <h2>Segment {displaySegmentIndex + 1}</h2>
-      {entries.map(({ score, segmentIndex, startSeconds, track }) => (
+    <section
+      className="feedback-panel feedback-rail segment-panel"
+      aria-label={`segment ${displaySegmentIndex + 1} similar segments`}
+    >
+      {entries.map(({ segmentIndex, startSeconds, track }) => (
         <button
           type="button"
-          className="segment-line"
+          className="feedback-art-button"
           key={`${track.id}:${segmentIndex}`}
+          aria-label={`${track.title}, segment ${segmentIndex + 1}`}
+          title={`${track.title} · Segment ${segmentIndex + 1}`}
           onClick={() => onPlayTrack(track, startSeconds)}
         >
-          <span className="track-summary">
-            <img className="panel-art" src={artUrl(track.id)} alt="" loading="lazy" />
-            <span>
-              <strong>{track.title}</strong>
-              <small>Segment {segmentIndex + 1}</small>
-            </span>
-          </span>
-          <span className="segment-score">
-            <Play aria-hidden="true" size={13} fill="currentColor" strokeWidth={0} />
-            {Math.round(score * 100)}%
-          </span>
+          <img src={artUrl(track.id)} alt="" loading="lazy" draggable={false} />
         </button>
       ))}
     </section>

@@ -1,4 +1,4 @@
-import { type RefObject, type SyntheticEvent, useEffect, useRef, useState } from "react";
+import { type RefObject, type SyntheticEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Disc3,
   MoreHorizontal,
@@ -7,11 +7,14 @@ import {
   Repeat2,
   SkipBack,
   SkipForward,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Waypoints,
 } from "lucide-react";
+import { SEGMENT_WINDOW_SECONDS } from "../autoplay";
 import { artUrl } from "../api";
-import type { SimilarityMode, Track } from "../types";
+import type { FeedbackLabel, SimilarityMode, Track } from "../types";
 
 export type AudioDeck = "primary" | "secondary";
 
@@ -26,6 +29,7 @@ type Props = {
   currentTime: number;
   currentDuration: number;
   canPlayNext: boolean;
+  feedbackNotice: { id: number; label: FeedbackLabel } | null;
   onTrackModeSelect: () => void;
   onSegmentModeSelect: () => void;
   onPrevious: () => void;
@@ -35,6 +39,7 @@ type Props = {
   onSeek: (seconds: number) => void;
   onDelete: (track: Track) => void;
   onTimeUpdate: (deck: AudioDeck, event: SyntheticEvent<HTMLAudioElement>) => void;
+  onFeedbackNoticeDone: (id: number) => void;
 };
 
 export function NowPlaying({
@@ -48,6 +53,7 @@ export function NowPlaying({
   currentTime,
   currentDuration,
   canPlayNext,
+  feedbackNotice,
   onTrackModeSelect,
   onSegmentModeSelect,
   onPrevious,
@@ -57,6 +63,7 @@ export function NowPlaying({
   onSeek,
   onDelete,
   onTimeUpdate,
+  onFeedbackNoticeDone,
 }: Props) {
   const [showRemaining, setShowRemaining] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -65,6 +72,22 @@ export function NowPlaying({
   const duration = Number.isFinite(currentDuration) ? currentDuration : 0;
   const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const subtitle = selected?.album ?? selected?.artist ?? selected?.filename ?? "";
+  const segmentPieces = useMemo(() => {
+    if (similarityMode !== "segment" || duration <= 0 || !selected || (selected.segment_count ?? 0) <= 0) {
+      return [];
+    }
+    const pieceCount = Math.ceil(duration / SEGMENT_WINDOW_SECONDS);
+    return Array.from({ length: pieceCount }, (_, index) => {
+      const start = index * SEGMENT_WINDOW_SECONDS;
+      const pieceDuration = Math.min(SEGMENT_WINDOW_SECONDS, duration - start);
+      const filledSeconds = Math.min(Math.max(currentTime - start, 0), pieceDuration);
+      return {
+        fill: (filledSeconds / pieceDuration) * 100,
+        start,
+      };
+    });
+  }, [currentTime, duration, selected, similarityMode]);
+  const hasSegmentPieces = segmentPieces.length > 0;
 
   useEffect(() => {
     if (!menuOpen) {
@@ -90,6 +113,26 @@ export function NowPlaying({
 
   return (
     <section className={selected ? "now-playing active" : "now-playing idle"}>
+      {feedbackNotice ? (
+        <div
+          className="player-feedback-notice"
+          key={feedbackNotice.id}
+          role="status"
+          aria-live="polite"
+          onAnimationEnd={() => onFeedbackNoticeDone(feedbackNotice.id)}
+        >
+          {feedbackNotice.label === "similar" ? (
+            <ThumbsUp aria-hidden="true" size={16} strokeWidth={2.4} />
+          ) : (
+            <ThumbsDown aria-hidden="true" size={16} strokeWidth={2.4} />
+          )}
+          <span>
+            {feedbackNotice.label === "similar"
+              ? "비슷함으로 표시됨"
+              : "비슷하지 않음으로 표시됨"}
+          </span>
+        </div>
+      ) : null}
       <div className="player-controls-left">
         <button
           type="button"
@@ -174,8 +217,19 @@ export function NowPlaying({
           onFocus={() => setSeekActive(true)}
           onBlur={() => setSeekActive(false)}
         >
-          <div className="seek-track" aria-hidden="true">
-            <span style={{ width: `${progress}%` }} />
+          <div className={hasSegmentPieces ? "seek-track segmented" : "seek-track"} aria-hidden="true">
+            {hasSegmentPieces ? (
+              segmentPieces.map((piece) => (
+                <span
+                  className="seek-segment-piece"
+                  key={piece.start}
+                >
+                  <span className="seek-segment-fill" style={{ width: `${piece.fill}%` }} />
+                </span>
+              ))
+            ) : (
+              <span style={{ width: `${progress}%` }} />
+            )}
           </div>
           <input
             type="range"

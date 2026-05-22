@@ -22,6 +22,8 @@ export function Topbar({
   onFilesSelected,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const nextViewMode = viewMode === "2d" ? "3d" : "2d";
+  const viewModeLabel = viewMode === "2d" ? "2D" : "3D";
 
   return (
     <section className="topbar">
@@ -48,22 +50,15 @@ export function Topbar({
             </button>
           ) : null}
         </div>
-        <div className="mode-toggle" role="group" aria-label="view mode">
-          <button
-            type="button"
-            className={viewMode === "2d" ? "active" : ""}
-            onClick={() => onViewModeChange("2d")}
-          >
-            2D
-          </button>
-          <button
-            type="button"
-            className={viewMode === "3d" ? "active" : ""}
-            onClick={() => onViewModeChange("3d")}
-          >
-            3D
-          </button>
-        </div>
+        <button
+          type="button"
+          className="icon-button view-mode-button"
+          aria-label={`Current view: ${viewModeLabel}. Switch to ${nextViewMode.toUpperCase()} view`}
+          title={`Switch to ${nextViewMode.toUpperCase()} view`}
+          onClick={() => onViewModeChange(nextViewMode)}
+        >
+          {viewModeLabel}
+        </button>
       </div>
       <input
         ref={fileInputRef}
