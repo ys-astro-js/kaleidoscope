@@ -167,7 +167,9 @@ export function useAutoplayRouting({
       return;
     }
 
-    const secondsIntoSegment = currentTime - currentSegmentIndex * SEGMENT_HOP_SECONDS;
+    const audio = getAudio(activeDeckRef.current);
+    const playbackTime = audio?.currentTime ?? currentTime;
+    const secondsIntoSegment = playbackTime - currentSegmentIndex * SEGMENT_HOP_SECONDS;
     if (secondsIntoSegment < AUTOPLAY_TRIGGER_SECONDS) {
       return;
     }
@@ -195,9 +197,11 @@ export function useAutoplayRouting({
     crossfadeToTrack(targetTrack, match.start_seconds);
   }, [
     autoplayKeyRef,
+    activeDeckRef,
     crossfadeToTrack,
     currentSegmentIndex,
     currentTime,
+    getAudio,
     isCrossfadingRef,
     recordAutoplayVisit,
     routePreview,
@@ -309,7 +313,7 @@ export function useAutoplayRouting({
     if (trackAutoplayPreview.trackId !== selected.id) {
       return;
     }
-    if (currentTime < trackAutoplayPreview.triggerSeconds) {
+    if (audio.currentTime < trackAutoplayPreview.triggerSeconds) {
       return;
     }
 

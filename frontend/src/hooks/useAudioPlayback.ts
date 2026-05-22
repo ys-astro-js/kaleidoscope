@@ -1,4 +1,12 @@
-import { type Dispatch, type SetStateAction, type SyntheticEvent, useCallback, useRef, useState } from "react";
+import {
+  type Dispatch,
+  type SetStateAction,
+  type SyntheticEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { audioUrl, fetchSimilarSegments } from "../api";
 import {
   CROSSFADE_SECONDS,
@@ -58,6 +66,8 @@ export function useAudioPlayback({
   const [activeDeck, setActiveDeck] = useState<AudioDeck>("primary");
   const activeDeckRef = useRef<AudioDeck>("primary");
   const fadeFrameRef = useRef<number | null>(null);
+  const fadeIntervalRef = useRef<number | null>(null);
+  const fadeTimeoutRef = useRef<number | null>(null);
   const isCrossfadingRef = useRef(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [currentDuration, setCurrentDuration] = useState(0);
@@ -75,6 +85,14 @@ export function useAudioPlayback({
       window.cancelAnimationFrame(fadeFrameRef.current);
       fadeFrameRef.current = null;
     }
+    if (fadeIntervalRef.current !== null) {
+      window.clearInterval(fadeIntervalRef.current);
+      fadeIntervalRef.current = null;
+    }
+    if (fadeTimeoutRef.current !== null) {
+      window.clearTimeout(fadeTimeoutRef.current);
+      fadeTimeoutRef.current = null;
+    }
     isCrossfadingRef.current = false;
   }, []);
 
@@ -83,6 +101,20 @@ export function useAudioPlayback({
     pauseAudio(primaryAudioRef.current);
     pauseAudio(secondaryAudioRef.current);
   }, [cancelFade]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const audio = getAudio(activeDeckRef.current);
+      if (!audio || audio.paused) {
+        return;
+      }
+      setCurrentTime(audio.currentTime);
+      if (Number.isFinite(audio.duration)) {
+        setCurrentDuration(audio.duration);
+      }
+    }, 500);
+    return () => window.clearInterval(interval);
+  }, [getAudio]);
 
   const playTrack = useCallback((track: Track, startSeconds?: number) => {
     cancelFade();
@@ -181,23 +213,28 @@ export function useAudioPlayback({
         .play()
         .then(() => {
           const fadeStart = performance.now();
-          const fade = (now: number) => {
-            const progress = Math.min(1, (now - fadeStart) / (CROSSFADE_SECONDS * 1000));
-            const eased = progress * progress * (3 - 2 * progress);
-            fromAudio.volume = 1 - eased;
-            toAudio.volume = eased;
-
-            if (progress < 1) {
-              fadeFrameRef.current = window.requestAnimationFrame(fade);
+          const commitTransition = () => {
+            if (transitionCommitted) {
               return;
+            }
+            transitionCommitted = true;
+            if (fadeFrameRef.current !== null) {
+              window.cancelAnimationFrame(fadeFrameRef.current);
+              fadeFrameRef.current = null;
+            }
+            if (fadeIntervalRef.current !== null) {
+              window.clearInterval(fadeIntervalRef.current);
+              fadeIntervalRef.current = null;
+            }
+            if (fadeTimeoutRef.current !== null) {
+              window.clearTimeout(fadeTimeoutRef.current);
+              fadeTimeoutRef.current = null;
             }
 
             fromAudio.pause();
             fromAudio.volume = 1;
             toAudio.volume = 1;
-            fadeFrameRef.current = null;
             isCrossfadingRef.current = false;
-            transitionCommitted = true;
             options.onCommit?.();
             setTrackAutoplayPreview(null);
             trackAutoplayPreviewKeyRef.current = "";
@@ -221,6 +258,34 @@ export function useAudioPlayback({
             setCurrentDuration(toAudio.duration);
             activateDeck(toDeck);
           };
+          const updateFade = (now: number): boolean => {
+            if (transitionCommitted) {
+              return true;
+            }
+            const progress = Math.min(1, (now - fadeStart) / (CROSSFADE_SECONDS * 1000));
+            const eased = progress * progress * (3 - 2 * progress);
+            fromAudio.volume = 1 - eased;
+            toAudio.volume = eased;
+
+            if (progress >= 1) {
+              commitTransition();
+              return true;
+            }
+            return false;
+          };
+          const fade = (now: number) => {
+            if (!updateFade(now)) {
+              fadeFrameRef.current = window.requestAnimationFrame(fade);
+            }
+          };
+          fadeIntervalRef.current = window.setInterval(
+            () => updateFade(performance.now()),
+            100
+          );
+          fadeTimeoutRef.current = window.setTimeout(
+            commitTransition,
+            CROSSFADE_SECONDS * 1000
+          );
           fadeFrameRef.current = window.requestAnimationFrame(fade);
         })
         .catch(() => {
