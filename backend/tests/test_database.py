@@ -85,7 +85,10 @@ def test_feedback_weights_roundtrip(tmp_path: Path) -> None:
         conn,
         global_weight=0.2,
         segment_weight=0.3,
-        chroma_weight=0.5,
+        vocals_global_weight=0.1,
+        vocals_segment_weight=0.1,
+        instrumental_global_weight=0.2,
+        instrumental_segment_weight=0.1,
         event_count=12,
     )
 
@@ -94,8 +97,55 @@ def test_feedback_weights_roundtrip(tmp_path: Path) -> None:
     assert row is not None
     assert row["global_weight"] == 0.2
     assert row["segment_weight"] == 0.3
-    assert row["chroma_weight"] == 0.5
+    assert row["vocals_global_weight"] == 0.1
+    assert row["vocals_segment_weight"] == 0.1
+    assert row["instrumental_global_weight"] == 0.2
+    assert row["instrumental_segment_weight"] == 0.1
     assert row["event_count"] == 12
+
+
+def test_init_db_removes_unexpected_feedback_weight_columns(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    conn.execute(
+        """
+        CREATE TABLE feedback_weights (
+            id TEXT PRIMARY KEY,
+            global_weight REAL NOT NULL,
+            segment_weight REAL NOT NULL,
+            aux_weight REAL NOT NULL,
+            event_count INTEGER NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO feedback_weights (
+            id,
+            global_weight,
+            segment_weight,
+            aux_weight,
+            event_count
+        )
+        VALUES ('global', 0.7, 0.3, 0.0, 2)
+        """
+    )
+    conn.commit()
+
+    database.init_db(conn)
+
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(feedback_weights)")}
+    row = database.get_feedback_weights(conn)
+
+    assert "aux_weight" not in columns
+    assert row is not None
+    assert row["global_weight"] == 0.7
+    assert row["segment_weight"] == 0.3
+    assert row["vocals_global_weight"] == 0.171875
+    assert row["vocals_segment_weight"] == 0.078125
+    assert row["instrumental_global_weight"] == 0.171875
+    assert row["instrumental_segment_weight"] == 0.078125
+    assert row["event_count"] == 2
 
 
 def test_track_layout_stores_cluster_label(tmp_path: Path) -> None:

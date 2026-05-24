@@ -5,10 +5,11 @@ from pathlib import Path
 from app import database
 from app.audio import extract_metadata, normalize_audio_for_model, write_art_or_placeholder
 from app.config import Settings
-from app.embedding import get_embedder
+from app.embedding import MIN_SEGMENT_ERROR, TrackEmbeddings, get_embedder
 from app.feedback import DEFAULT_WEIGHTS, learn_feedback_weights
 from app.layout import compute_similarity_layout
-from app.models import FeedbackLabel, SimilarTrack, Track
+from app.models import AudioStem, FeedbackLabel, SimilarTrack, Track
+from app.separation import separate_vocals_and_instrumental
 from app.vector_store import SimilarityWeights, VectorStore
 
 SimilarById = dict[str, list[dict[str, float | str]]]
@@ -24,6 +25,7 @@ class TrackService:
         self._similar_cache: SimilarById = {}
         self._similar_cache_weights: SimilarityWeights | None = None
         self._similar_refreshing = False
+        self._processing_lock = threading.Lock()
 
     def list_tracks(self) -> list[Track]:
         similar_by_id = self.cached_similar_by_id()
@@ -56,8 +58,9 @@ class TrackService:
                     x=row["x"],
                     y=row["y"],
                     z=row["z"],
-                    cluster=None,
+                    cluster=row["cluster"],
                     segment_count=segment_counts.get(row["id"], 0),
+                    available_stems=_available_stems(row),
                     similar=[SimilarTrack(id=str(item["id"]), score=float(item["score"])) for item in similar],
                 )
             )
@@ -105,18 +108,39 @@ class TrackService:
             database.update_track(self.conn, track_id, status="processing")
             artist, album, art_bytes = extract_metadata(Path(row["audio_path"]))
             art_path = write_art_or_placeholder(track_id, art_bytes, self.settings.art_dir)
-            model_audio_path = normalize_audio_for_model(
-                Path(row["audio_path"]),
-                self.settings.audio_dir / f"{track_id}.model.wav",
-                self.settings.sample_rate,
-            )
-            embedder = get_embedder(self.settings.model_id, self.settings.sample_rate)
-            embeddings = embedder.embed_file(str(model_audio_path))
+
+            with self._processing_lock:
+                stem_paths = separate_vocals_and_instrumental(
+                    Path(row["audio_path"]),
+                    track_id=track_id,
+                    output_dir=self.settings.stem_dir,
+                    model_dir=self.settings.separator_model_dir,
+                )
+                embedder = get_embedder(self.settings.model_id, self.settings.sample_rate)
+                embeddings = self._embed_for_model(
+                    embedder,
+                    Path(row["audio_path"]),
+                    self.settings.audio_dir / f"{track_id}.model.wav",
+                )
+                vocals_embeddings = self._embed_optional_stem(
+                    embedder,
+                    stem_paths.vocals_path,
+                    self.settings.audio_dir / f"{track_id}.vocals.model.wav",
+                )
+                instrumental_embeddings = self._embed_optional_stem(
+                    embedder,
+                    stem_paths.instrumental_path,
+                    self.settings.audio_dir / f"{track_id}.instrumental.model.wav",
+                )
+
             self.vectors.upsert(
                 track_id,
                 embeddings.global_semantic,
                 embeddings.segment_semantic,
-                embeddings.cover_chroma,
+                vocals_embeddings.global_semantic if vocals_embeddings else None,
+                vocals_embeddings.segment_semantic if vocals_embeddings else None,
+                instrumental_embeddings.global_semantic if instrumental_embeddings else None,
+                instrumental_embeddings.segment_semantic if instrumental_embeddings else None,
             )
             self.invalidate_similarity_cache()
             database.update_track(
@@ -126,10 +150,33 @@ class TrackService:
                 artist=artist,
                 album=album,
                 art_path=art_path,
+                vocals_path=stem_paths.vocals_path,
+                instrumental_path=stem_paths.instrumental_path,
             )
             self.recompute_layout()
         except Exception as exc:
             database.update_track(self.conn, track_id, status="error", error=str(exc))
+
+    def _embed_for_model(self, embedder, input_path: Path, model_audio_path: Path) -> TrackEmbeddings:
+        normalized_path = normalize_audio_for_model(
+            input_path,
+            model_audio_path,
+            self.settings.sample_rate,
+        )
+        return embedder.embed_file(str(normalized_path))
+
+    def _embed_optional_stem(
+        self,
+        embedder,
+        input_path: Path,
+        model_audio_path: Path,
+    ) -> TrackEmbeddings | None:
+        try:
+            return self._embed_for_model(embedder, input_path, model_audio_path)
+        except ValueError as exc:
+            if str(exc) == MIN_SEGMENT_ERROR:
+                return None
+            raise
 
     def recompute_layout(self) -> None:
         ready_ids = {row["id"] for row in database.ready_tracks(self.conn)}
@@ -166,7 +213,10 @@ class TrackService:
             self.conn,
             global_weight=result.weights.global_semantic,
             segment_weight=result.weights.segment_semantic,
-            chroma_weight=result.weights.cover_chroma,
+            vocals_global_weight=result.weights.vocals_global_semantic,
+            vocals_segment_weight=result.weights.vocals_segment_semantic,
+            instrumental_global_weight=result.weights.instrumental_global_semantic,
+            instrumental_segment_weight=result.weights.instrumental_segment_semantic,
             event_count=result.event_count,
         )
         self.invalidate_similarity_cache()
@@ -179,7 +229,10 @@ class TrackService:
         return SimilarityWeights(
             global_semantic=float(row["global_weight"]),
             segment_semantic=float(row["segment_weight"]),
-            cover_chroma=float(row["chroma_weight"]),
+            vocals_global_semantic=float(row["vocals_global_weight"]),
+            vocals_segment_semantic=float(row["vocals_segment_weight"]),
+            instrumental_global_semantic=float(row["instrumental_global_weight"]),
+            instrumental_segment_semantic=float(row["instrumental_segment_weight"]),
         )
 
     def delete_all_tracks(self) -> None:
@@ -202,10 +255,26 @@ class TrackService:
         track_id = row["id"]
         database.delete_track(self.conn, track_id)
         self.vectors.delete(track_id)
-        for path_key in ("audio_path", "art_path"):
+        for path_key in ("audio_path", "art_path", "vocals_path", "instrumental_path"):
+            if not row[path_key]:
+                continue
             path = Path(row[path_key])
             if path.exists():
                 path.unlink()
-        model_audio_path = self.settings.audio_dir / f"{track_id}.model.wav"
-        if model_audio_path.exists():
-            model_audio_path.unlink()
+        for filename in (
+            f"{track_id}.model.wav",
+            f"{track_id}.vocals.model.wav",
+            f"{track_id}.instrumental.model.wav",
+        ):
+            model_audio_path = self.settings.audio_dir / filename
+            if model_audio_path.exists():
+                model_audio_path.unlink()
+
+
+def _available_stems(row: dict) -> list[AudioStem]:
+    stems: list[AudioStem] = ["original"]
+    if row.get("vocals_path"):
+        stems.append("vocals")
+    if row.get("instrumental_path"):
+        stems.append("instrumental")
+    return stems

@@ -1,4 +1,4 @@
-import { type Dispatch, type SetStateAction, useEffect } from "react";
+import { type Dispatch, type SetStateAction, useEffect, useState } from "react";
 import { fetchSimilarSegments } from "../api";
 import {
   AUTOPLAY_HISTORY_LIMIT,
@@ -6,10 +6,12 @@ import {
   SEGMENT_HOP_SECONDS,
   buildTrackAutoplayCandidates,
   chooseTrackAutoplayCandidate,
+  segmentAutoplaySourceSegmentIndex,
   segmentEndSeconds,
   segmentTriggerSeconds,
   trackAutoplaySourceSegmentIndexes,
   type RoutePreview,
+  type SegmentAutoplayPreview,
   type SegmentVisit,
   type TrackAutoplayCandidate,
   type TrackAutoplayPreview,
@@ -95,6 +97,9 @@ export function useAutoplayRouting({
   buildRoutePreviewFromHistory,
   crossfadeToTrack,
 }: UseAutoplayRoutingOptions) {
+  const [segmentAutoplayPreview, setSegmentAutoplayPreview] =
+    useState<SegmentAutoplayPreview | null>(null);
+
   useEffect(() => {
     if (!selectedId || similarityMode !== "segment") {
       setRoutePreview(null);
@@ -113,7 +118,7 @@ export function useAutoplayRouting({
             requestSource,
             matches,
             tracksRef.current,
-            segmentAutoplay
+            false
           )
         );
       })
@@ -127,7 +132,6 @@ export function useAutoplayRouting({
     buildRoutePreviewFromHistory,
     currentSegmentIndex,
     isCrossfadingRef,
-    segmentAutoplay,
     selectedId,
     setRoutePreview,
     similarityMode,
@@ -139,28 +143,87 @@ export function useAutoplayRouting({
       return;
     }
     const nextTrackId =
-      similarityMode === "segment" && segmentAutoplay
-        ? chooseAutoplayMatchFromHistory(routePreview.matches, tracks, {
-            trackId: routePreview.trackId,
-            segmentIndex: routePreview.segmentIndex,
-          })?.track.id ?? null
+      similarityMode === "segment" &&
+      segmentAutoplay &&
+      segmentAutoplayPreview &&
+      routePreview.matches.some((match) => match.id === segmentAutoplayPreview.nextTrackId)
+        ? segmentAutoplayPreview.nextTrackId
         : null;
     if (routePreview.nextTrackId === nextTrackId) {
       return;
     }
     setRoutePreview({ ...routePreview, nextTrackId });
   }, [
-    chooseAutoplayMatchFromHistory,
     routePreview,
     segmentAutoplay,
+    segmentAutoplayPreview,
     setRoutePreview,
     similarityMode,
-    tracks,
+  ]);
+
+  useEffect(() => {
+    if (!segmentAutoplay || similarityMode !== "segment" || !selectedId) {
+      setSegmentAutoplayPreview(null);
+      return;
+    }
+    if (isCrossfadingRef.current) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const preferredSourceIndex = segmentAutoplaySourceSegmentIndex(
+      currentSegmentIndex,
+      selectedSegmentCount
+    );
+
+    const loadPreview = async () => {
+      let source = { trackId: selectedId, segmentIndex: preferredSourceIndex };
+      let matches = await fetchSimilarSegments(source.trackId, source.segmentIndex, controller.signal);
+      let target = chooseAutoplayMatchFromHistory(matches, tracksRef.current, source);
+
+      if (
+        !target &&
+        selectedSegmentCount <= 0 &&
+        preferredSourceIndex !== currentSegmentIndex
+      ) {
+        source = { trackId: selectedId, segmentIndex: currentSegmentIndex };
+        matches = await fetchSimilarSegments(source.trackId, source.segmentIndex, controller.signal);
+        target = chooseAutoplayMatchFromHistory(matches, tracksRef.current, source);
+      }
+
+      if (!target) {
+        setSegmentAutoplayPreview(null);
+        return;
+      }
+
+      setSegmentAutoplayPreview({
+        ...source,
+        match: target.match,
+        nextTrackId: target.track.id,
+      });
+    };
+
+    loadPreview().catch((error: Error) => {
+      if (error.name !== "AbortError") {
+        setSegmentAutoplayPreview(null);
+      }
+    });
+    return () => controller.abort();
+  }, [
+    chooseAutoplayMatchFromHistory,
+    currentSegmentIndex,
+    isCrossfadingRef,
+    segmentAutoplay,
+    selectedId,
+    selectedSegmentCount,
+    similarityMode,
+    tracksRef,
   ]);
 
   useEffect(() => {
     if (!segmentAutoplay || similarityMode !== "segment" || !selected) {
       autoplayKeyRef.current = "";
+      setSegmentAutoplayPreview(null);
       return;
     }
     if (isCrossfadingRef.current) {
@@ -174,22 +237,25 @@ export function useAutoplayRouting({
       return;
     }
     if (
-      !routePreview ||
-      routePreview.trackId !== selected.id ||
-      routePreview.segmentIndex !== currentSegmentIndex ||
-      !routePreview.nextTrackId
+      !segmentAutoplayPreview ||
+      segmentAutoplayPreview.trackId !== selected.id ||
+      !isSegmentAutoplayPreviewForCurrentSegment(
+        segmentAutoplayPreview,
+        currentSegmentIndex,
+        selectedSegmentCount
+      )
     ) {
       return;
     }
 
     recordAutoplayVisit(selected.id, currentSegmentIndex);
-    const match = routePreview.matches.find((candidate) => candidate.id === routePreview.nextTrackId);
-    const targetTrack = tracks.find((track) => track.id === routePreview.nextTrackId);
+    const match = segmentAutoplayPreview.match;
+    const targetTrack = tracks.find((track) => track.id === segmentAutoplayPreview.nextTrackId);
     if (!match || !targetTrack) {
       return;
     }
 
-    const autoplayKey = `${selected.id}:${currentSegmentIndex}:${match.id}:${match.segment_index}`;
+    const autoplayKey = `${selected.id}:${currentSegmentIndex}:${segmentAutoplayPreview.segmentIndex}:${match.id}:${match.segment_index}`;
     if (autoplayKeyRef.current === autoplayKey) {
       return;
     }
@@ -204,9 +270,10 @@ export function useAutoplayRouting({
     getAudio,
     isCrossfadingRef,
     recordAutoplayVisit,
-    routePreview,
     segmentAutoplay,
+    segmentAutoplayPreview,
     selected,
+    selectedSegmentCount,
     similarityMode,
     tracks
   ]);
@@ -342,4 +409,19 @@ export function useAutoplayRouting({
     trackAutoplayPreview,
     trackAutoplayTarget,
   ]);
+}
+
+function isSegmentAutoplayPreviewForCurrentSegment(
+  preview: SegmentAutoplayPreview,
+  currentSegmentIndex: number,
+  selectedSegmentCount: number
+): boolean {
+  const preferredSourceIndex = segmentAutoplaySourceSegmentIndex(
+    currentSegmentIndex,
+    selectedSegmentCount
+  );
+  if (preview.segmentIndex === preferredSourceIndex) {
+    return true;
+  }
+  return selectedSegmentCount <= 0 && preview.segmentIndex === currentSegmentIndex;
 }

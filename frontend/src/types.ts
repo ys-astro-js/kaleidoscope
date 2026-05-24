@@ -2,6 +2,7 @@ export type TrackStatus = "queued" | "processing" | "ready" | "error";
 export type FeedbackLabel = "similar" | "not_similar";
 export type ViewMode = "2d" | "3d";
 export type SimilarityMode = "track" | "segment";
+export type AudioStem = "original" | "vocals" | "instrumental";
 
 export type SimilarTrack = {
   id: string;
@@ -26,5 +27,6 @@ export type Track = {
   z: number | null;
   cluster: number | null;
   segment_count?: number;
+  available_stems: AudioStem[];
   similar: SimilarTrack[];
 };

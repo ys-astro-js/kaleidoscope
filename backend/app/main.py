@@ -40,7 +40,7 @@ def create_app(app_context: AppContext = context) -> FastAPI:
 
 
 def resume_pending_tracks(app_context: AppContext) -> None:
-    app_context.service.recompute_layout()
+    asyncio.create_task(asyncio.to_thread(app_context.service.recompute_layout))
     for row in database.list_tracks(app_context.conn):
         if row["status"] in {"queued", "processing"}:
             asyncio.create_task(asyncio.to_thread(app_context.service.process_track, row["id"]))

@@ -16,7 +16,7 @@ import { useAutoplayHistory } from "./hooks/useAutoplayHistory";
 import { useAutoplayRouting } from "./hooks/useAutoplayRouting";
 import { useTrackLibrary } from "./hooks/useTrackLibrary";
 import MusicScene from "./MusicScene";
-import type { FeedbackLabel, SimilarityMode, Track, ViewMode } from "./types";
+import type { AudioStem, FeedbackLabel, SimilarityMode, Track, ViewMode } from "./types";
 
 type PlaybackVisit = {
   trackId: string;
@@ -33,6 +33,7 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("3d");
   const [similarityMode, setSimilarityMode] = useState<SimilarityMode>("track");
+  const [playbackStem, setPlaybackStem] = useState<AudioStem>("original");
   const [trackAutoplay, setTrackAutoplay] = useState(false);
   const [segmentAutoplay, setSegmentAutoplay] = useState(false);
   const [routePreview, setRoutePreview] = useState<RoutePreview | null>(null);
@@ -99,6 +100,8 @@ export default function App() {
     seekTo,
     handleTimeUpdate,
   } = useAudioPlayback({
+    selected,
+    playbackStem,
     similarityMode,
     trackAutoplay,
     segmentAutoplay,
@@ -406,8 +409,10 @@ export default function App() {
         currentDuration={currentDuration}
         canPlayNext={hasNext}
         feedbackNotice={feedbackNotice}
+        playbackStem={playbackStem}
         onTrackModeSelect={selectTrackMode}
         onSegmentModeSelect={selectSegmentMode}
+        onStemChange={setPlaybackStem}
         onPrevious={playPrevious}
         onPlayPause={togglePlayback}
         onNext={playNext}

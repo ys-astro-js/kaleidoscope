@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { audioUrl, fetchSimilarSegments } from "../api";
+import { audioUrl, fetchSimilarSegments, resolveAudioStem } from "../api";
 import {
   CROSSFADE_SECONDS,
   segmentIndexForTime,
@@ -16,7 +16,7 @@ import {
   type TrackAutoplayPreview,
 } from "../autoplay";
 import type { AudioDeck } from "../components/NowPlaying";
-import type { SimilarSegment, SimilarityMode, Track } from "../types";
+import type { AudioStem, SimilarSegment, SimilarityMode, Track } from "../types";
 
 type MutableRef<T> = {
   current: T;
@@ -28,6 +28,8 @@ type CrossfadeOptions = {
 };
 
 type UseAudioPlaybackOptions = {
+  selected: Track | null;
+  playbackStem: AudioStem;
   similarityMode: SimilarityMode;
   trackAutoplay: boolean;
   segmentAutoplay: boolean;
@@ -48,6 +50,8 @@ type UseAudioPlaybackOptions = {
 };
 
 export function useAudioPlayback({
+  selected,
+  playbackStem,
   similarityMode,
   trackAutoplay,
   segmentAutoplay,
@@ -75,6 +79,9 @@ export function useAudioPlayback({
 
   const getAudio = useCallback((deck: AudioDeck): HTMLAudioElement | null =>
     deck === "primary" ? primaryAudioRef.current : secondaryAudioRef.current, []);
+
+  const trackAudioUrl = useCallback((track: Track): string =>
+    audioUrl(track.id, resolveAudioStem(track, playbackStem)), [playbackStem]);
 
   const activateDeck = useCallback((deck: AudioDeck) => {
     activeDeckRef.current = deck;
@@ -168,7 +175,7 @@ export function useAudioPlayback({
     }
     pauseAudio(inactiveAudio);
     audio.volume = 1;
-    audio.src = audioUrl(track.id);
+    audio.src = trackAudioUrl(track);
     audio.onloadedmetadata = () => {
       const defaultStartSeconds = similarityMode === "track" && !trackAutoplay ? 39 : 0;
       const nextCurrentTime =
@@ -194,6 +201,7 @@ export function useAudioPlayback({
     similarityMode,
     trackAutoplay,
     trackAutoplayPreviewKeyRef,
+    trackAudioUrl,
   ]);
 
   const crossfadeToTrack = useCallback((
@@ -237,7 +245,7 @@ export function useAudioPlayback({
     }
     toAudio.pause();
     toAudio.volume = 0;
-    toAudio.src = audioUrl(track.id);
+    toAudio.src = trackAudioUrl(track);
     toAudio.onloadedmetadata = () => {
       toAudio.currentTime = Math.min(startSeconds, Math.max(0, toAudio.duration - 1));
       void toAudio
@@ -337,8 +345,41 @@ export function useAudioPlayback({
     setTrackAutoplayPreview,
     similarityMode,
     trackAutoplayPreviewKeyRef,
+    trackAudioUrl,
     tracksRef,
   ]);
+
+  useEffect(() => {
+    if (!selected) {
+      return;
+    }
+    const audio = getAudio(activeDeckRef.current);
+    if (!audio || !audio.src) {
+      return;
+    }
+    const nextSrc = new URL(trackAudioUrl(selected), window.location.href).href;
+    if (audio.src === nextSrc) {
+      return;
+    }
+
+    const nextCurrentTime = audio.currentTime;
+    const shouldResume = !audio.paused;
+    const handleLoadedMetadata = () => {
+      const duration = Number.isFinite(audio.duration) ? audio.duration : nextCurrentTime;
+      audio.currentTime = Math.min(nextCurrentTime, Math.max(0, duration - 1));
+      setCurrentTime(audio.currentTime);
+      setCurrentDuration(duration);
+      if (shouldResume) {
+        void audio
+          .play()
+          .then(() => setIsPlaying(true))
+          .catch(() => setIsPlaying(false));
+      }
+    };
+    audio.pause();
+    audio.addEventListener("loadedmetadata", handleLoadedMetadata, { once: true });
+    audio.src = nextSrc;
+  }, [getAudio, playbackStem, selected, trackAudioUrl]);
 
   const handleTimeUpdate = useCallback((
     deck: AudioDeck,

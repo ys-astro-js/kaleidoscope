@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 TrackStatus = Literal["queued", "processing", "ready", "error"]
 FeedbackLabel = Literal["similar", "not_similar"]
+AudioStem = Literal["original", "vocals", "instrumental"]
 
 
 class FeedbackRequest(BaseModel):
@@ -37,4 +38,5 @@ class Track(BaseModel):
     z: float | None = None
     cluster: int | None = None
     segment_count: int = 0
+    available_stems: list[AudioStem] = Field(default_factory=lambda: ["original"])
     similar: list[SimilarTrack] = Field(default_factory=list)

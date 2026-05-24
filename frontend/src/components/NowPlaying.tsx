@@ -1,7 +1,9 @@
 import { type RefObject, type SyntheticEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Disc3,
+  Mic,
   MoreHorizontal,
+  Music,
   Pause,
   Play,
   Repeat2,
@@ -11,10 +13,11 @@ import {
   ThumbsUp,
   Trash2,
   Waypoints,
+  type LucideIcon,
 } from "lucide-react";
-import { SEGMENT_WINDOW_SECONDS } from "../autoplay";
-import { artUrl } from "../api";
-import type { FeedbackLabel, SimilarityMode, Track } from "../types";
+import { SEGMENT_HOP_SECONDS } from "../autoplay";
+import { artUrl, resolveAudioStem } from "../api";
+import type { AudioStem, FeedbackLabel, SimilarityMode, Track } from "../types";
 
 export type AudioDeck = "primary" | "secondary";
 
@@ -30,8 +33,10 @@ type Props = {
   currentDuration: number;
   canPlayNext: boolean;
   feedbackNotice: { id: number; label: FeedbackLabel } | null;
+  playbackStem: AudioStem;
   onTrackModeSelect: () => void;
   onSegmentModeSelect: () => void;
+  onStemChange: (stem: AudioStem) => void;
   onPrevious: () => void;
   onPlayPause: () => void;
   onNext: () => void;
@@ -54,8 +59,10 @@ export function NowPlaying({
   currentDuration,
   canPlayNext,
   feedbackNotice,
+  playbackStem,
   onTrackModeSelect,
   onSegmentModeSelect,
+  onStemChange,
   onPrevious,
   onPlayPause,
   onNext,
@@ -72,17 +79,24 @@ export function NowPlaying({
   const duration = Number.isFinite(currentDuration) ? currentDuration : 0;
   const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const subtitle = selected?.album ?? selected?.artist ?? selected?.filename ?? "";
+  const activeStem = selected ? resolveAudioStem(selected, playbackStem) : "original";
+  const stemOptions: Array<{ stem: AudioStem; label: string; Icon: LucideIcon }> = [
+    { stem: "original", label: "Original", Icon: Disc3 },
+    { stem: "vocals", label: "Vocals", Icon: Mic },
+    { stem: "instrumental", label: "Instrumental", Icon: Music },
+  ];
   const segmentPieces = useMemo(() => {
-    if (similarityMode !== "segment" || duration <= 0 || !selected || (selected.segment_count ?? 0) <= 0) {
+    if (similarityMode !== "segment" || duration <= 0 || !selected) {
       return [];
     }
-    const pieceCount = Math.ceil(duration / SEGMENT_WINDOW_SECONDS);
+    const pieceCount = Math.ceil(duration / SEGMENT_HOP_SECONDS);
     return Array.from({ length: pieceCount }, (_, index) => {
-      const start = index * SEGMENT_WINDOW_SECONDS;
-      const pieceDuration = Math.min(SEGMENT_WINDOW_SECONDS, duration - start);
+      const start = index * SEGMENT_HOP_SECONDS;
+      const pieceDuration = Math.min(SEGMENT_HOP_SECONDS, Math.max(0, duration - start));
       const filledSeconds = Math.min(Math.max(currentTime - start, 0), pieceDuration);
       return {
-        fill: (filledSeconds / pieceDuration) * 100,
+        duration: pieceDuration,
+        fill: pieceDuration > 0 ? (filledSeconds / pieceDuration) * 100 : 0,
         start,
       };
     });
@@ -147,6 +161,26 @@ export function NowPlaying({
             <Waypoints aria-hidden="true" size={18} strokeWidth={2.3} />
           )}
         </button>
+        <div className="stem-switcher" role="group" aria-label="Audio stem">
+          {stemOptions.map(({ stem, label, Icon }) => {
+            const isAvailable = selected
+              ? selected.available_stems.includes(stem)
+              : stem === "original";
+            return (
+              <button
+                type="button"
+                className={activeStem === stem ? "active" : ""}
+                aria-label={label}
+                title={label}
+                disabled={!selected || !isAvailable}
+                key={stem}
+                onClick={() => onStemChange(stem)}
+              >
+                <Icon aria-hidden="true" size={15} strokeWidth={2.35} />
+              </button>
+            );
+          })}
+        </div>
         <button
           type="button"
           className="icon-button"
@@ -223,6 +257,7 @@ export function NowPlaying({
                 <span
                   className="seek-segment-piece"
                   key={piece.start}
+                  style={{ flexGrow: piece.duration }}
                 >
                   <span className="seek-segment-fill" style={{ width: `${piece.fill}%` }} />
                 </span>

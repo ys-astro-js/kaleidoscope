@@ -545,8 +545,8 @@ button:disabled:hover {
   display: flex;
   align-items: center;
   gap: 18px;
-  width: min(33.333vw, calc(100vw - 40px));
-  min-width: 520px;
+  width: min(38vw, calc(100vw - 40px));
+  min-width: 620px;
   height: 72px;
   min-height: 72px;
   padding: 10px 12px;
@@ -616,6 +616,37 @@ button:disabled:hover {
 
 .player-mode-button {
   color: #cfcfcf;
+}
+
+.stem-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 38px;
+  min-height: 38px;
+  padding: 4px;
+  border-radius: 999px;
+  background: #222222;
+}
+
+.stem-switcher button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+}
+
+.stem-switcher button.active {
+  color: #f2f2f2;
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.stem-switcher button.active:hover {
+  background: rgba(255, 255, 255, 0.16);
 }
 
 .primary-play-button {
@@ -979,6 +1010,19 @@ button:disabled:hover {
     min-width: 34px;
     min-height: 34px;
     height: 34px;
+  }
+
+  .stem-switcher {
+    height: 34px;
+    min-height: 34px;
+    padding: 3px;
+  }
+
+  .stem-switcher button {
+    width: 28px;
+    min-width: 28px;
+    height: 28px;
+    min-height: 28px;
   }
 
   .player-main {

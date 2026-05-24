@@ -80,6 +80,20 @@ def insert_ready_track(conn, tmp_path: Path, track_id: str, audio_bytes: bytes =
     database.update_track(conn, track_id, status="ready")
 
 
+def add_stems(conn, tmp_path: Path, track_id: str) -> tuple[Path, Path]:
+    vocals_path = tmp_path / f"{track_id}.vocals.wav"
+    instrumental_path = tmp_path / f"{track_id}.instrumental.wav"
+    vocals_path.write_bytes(b"vocals")
+    instrumental_path.write_bytes(b"instrumental")
+    database.update_track(
+        conn,
+        track_id,
+        vocals_path=vocals_path,
+        instrumental_path=instrumental_path,
+    )
+    return vocals_path, instrumental_path
+
+
 def test_submit_feedback_records_valid_event(tmp_path: Path) -> None:
     conn = database.connect(tmp_path / "app.sqlite")
     database.init_db(conn)
@@ -219,3 +233,27 @@ def test_audio_range_response_returns_partial_content(tmp_path: Path) -> None:
     assert response.status_code == 206
     assert response.content == b"udi"
     assert response.headers["content-range"] == "bytes 1-3/5"
+
+
+def test_audio_endpoint_serves_requested_stem(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    insert_ready_track(conn, tmp_path, "query", audio_bytes=b"audio")
+    add_stems(conn, tmp_path, "query")
+    client = make_client(conn, tmp_path)
+
+    response = client.get("/api/tracks/query/audio?stem=vocals")
+
+    assert response.status_code == 200
+    assert response.content == b"vocals"
+
+
+def test_audio_endpoint_returns_404_for_missing_stem(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    insert_ready_track(conn, tmp_path, "query", audio_bytes=b"audio")
+    client = make_client(conn, tmp_path)
+
+    response = client.get("/api/tracks/query/audio?stem=vocals")
+
+    assert response.status_code == 404

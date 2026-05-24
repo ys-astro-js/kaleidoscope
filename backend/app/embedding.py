@@ -13,7 +13,6 @@ MIN_SEGMENT_ERROR = "Audio does not contain a usable 30 second segment"
 class TrackEmbeddings:
     global_semantic: list[float]
     segment_semantic: list[list[float]]
-    cover_chroma: list[float]
 
     @property
     def average(self) -> list[float]:
@@ -70,31 +69,6 @@ def aggregate_segment_vectors(vectors: list[np.ndarray]) -> np.ndarray:
     return normalize_vector(normalized.mean(axis=0))
 
 
-def compute_cover_chroma(wav: np.ndarray, sample_rate: int) -> list[float]:
-    if len(wav) == 0 or _rms(wav) == 0.0:
-        return []
-
-    import librosa
-
-    try:
-        chroma = librosa.feature.chroma_cqt(y=wav.astype(np.float32, copy=False), sr=sample_rate)
-    except Exception:
-        chroma = librosa.feature.chroma_stft(y=wav.astype(np.float32, copy=False), sr=sample_rate)
-
-    if chroma.size == 0:
-        return []
-
-    try:
-        _, beats = librosa.beat.beat_track(y=wav.astype(np.float32, copy=False), sr=sample_rate)
-        if len(beats) > 1:
-            chroma = librosa.util.sync(chroma, beats, aggregate=np.median)
-    except Exception:
-        pass
-
-    profile = np.asarray(chroma.mean(axis=1), dtype=np.float32)
-    return normalize_vector(profile).tolist()
-
-
 def _rms(wav: np.ndarray) -> float:
     if len(wav) == 0:
         return 0.0
@@ -120,7 +94,6 @@ class MuQEmbedder:
             if not segments:
                 raise ValueError(MIN_SEGMENT_ERROR)
 
-            cover_chroma = compute_cover_chroma(wav, self.sample_rate)
             model, device = self._load()
             segment_vectors = []
             with torch.inference_mode():
@@ -135,7 +108,6 @@ class MuQEmbedder:
             return TrackEmbeddings(
                 global_semantic=global_embedding,
                 segment_semantic=segment_embeddings,
-                cover_chroma=cover_chroma,
             )
         finally:
             del wav

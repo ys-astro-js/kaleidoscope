@@ -2,11 +2,11 @@ from pathlib import Path
 
 from app.feedback import DEFAULT_WEIGHTS, MIN_TRAINING_EVENTS, learn_feedback_weights
 from app.vector_store import (
-    COVER_CHROMA_KIND,
     GLOBAL_SEMANTIC_KIND,
     SEGMENT_SEMANTIC_KIND,
     EmbeddingRecord,
     VectorStore,
+    WEIGHT_FIELDS,
 )
 
 
@@ -14,14 +14,20 @@ def record(kind: str, vector: list[float], segment_index: int = -1) -> Embedding
     return EmbeddingRecord(kind=kind, segment_index=segment_index, vector=vector)
 
 
-def test_feedback_learning_keeps_default_weights_with_too_little_data(monkeypatch) -> None:
+def test_feedback_learning_uses_single_similar_event(monkeypatch) -> None:
     store = VectorStore(Path("unused"))
     monkeypatch.setattr(
         store,
         "all_embeddings",
         lambda: {
-            "query": [record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0])],
-            "candidate": [record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0])],
+            "query": [
+                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
+                record(SEGMENT_SEMANTIC_KIND, [0.0, 1.0], 0),
+            ],
+            "candidate": [
+                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
+                record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
+            ],
         },
     )
 
@@ -37,15 +43,44 @@ def test_feedback_learning_keeps_default_weights_with_too_little_data(monkeypatc
     )
 
     assert result.event_count == 1
-    assert result.weights == DEFAULT_WEIGHTS
-    assert MIN_TRAINING_EVENTS > result.event_count
+    assert MIN_TRAINING_EVENTS == 1
+    assert result.weights.global_semantic > DEFAULT_WEIGHTS.global_semantic
 
 
-def test_feedback_learning_increases_predictive_chroma_weight(monkeypatch) -> None:
+def test_feedback_learning_uses_single_not_similar_event(monkeypatch) -> None:
     store = VectorStore(Path("unused"))
-    query_chroma = [1.0, 1.0, *([0.0] * 10)]
-    matching_chroma = [0.0, 0.0, 1.0, 1.0, *([0.0] * 8)]
-    different_chroma = [1.0, 0.0, 1.0, *([0.0] * 9)]
+    monkeypatch.setattr(
+        store,
+        "all_embeddings",
+        lambda: {
+            "query": [
+                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
+                record(SEGMENT_SEMANTIC_KIND, [0.0, 1.0], 0),
+            ],
+            "candidate": [
+                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
+                record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
+            ],
+        },
+    )
+
+    result = learn_feedback_weights(
+        store,
+        [
+            {
+                "query_track_id": "query",
+                "candidate_track_id": "candidate",
+                "label": "not_similar",
+            }
+        ],
+    )
+
+    assert result.event_count == 1
+    assert result.weights.global_semantic < DEFAULT_WEIGHTS.global_semantic
+
+
+def test_feedback_learning_uses_only_global_and_segment_features(monkeypatch) -> None:
+    store = VectorStore(Path("unused"))
     monkeypatch.setattr(
         store,
         "all_embeddings",
@@ -53,27 +88,14 @@ def test_feedback_learning_increases_predictive_chroma_weight(monkeypatch) -> No
             "query": [
                 record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
                 record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
-                record(COVER_CHROMA_KIND, query_chroma),
             ],
             "cover_a": [
-                record(GLOBAL_SEMANTIC_KIND, [0.0, 1.0]),
-                record(SEGMENT_SEMANTIC_KIND, [0.0, 1.0], 0),
-                record(COVER_CHROMA_KIND, matching_chroma),
+                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
+                record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
             ],
             "cover_b": [
-                record(GLOBAL_SEMANTIC_KIND, [0.0, 1.0]),
-                record(SEGMENT_SEMANTIC_KIND, [0.0, 1.0], 0),
-                record(COVER_CHROMA_KIND, matching_chroma),
-            ],
-            "genre_a": [
                 record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
                 record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
-                record(COVER_CHROMA_KIND, different_chroma),
-            ],
-            "genre_b": [
-                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
-                record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
-                record(COVER_CHROMA_KIND, different_chroma),
             ],
         },
     )
@@ -83,10 +105,8 @@ def test_feedback_learning_increases_predictive_chroma_weight(monkeypatch) -> No
         [
             {"query_track_id": "query", "candidate_track_id": "cover_a", "label": "similar"},
             {"query_track_id": "query", "candidate_track_id": "cover_b", "label": "similar"},
-            {"query_track_id": "query", "candidate_track_id": "genre_a", "label": "not_similar"},
-            {"query_track_id": "query", "candidate_track_id": "genre_b", "label": "not_similar"},
         ],
     )
 
-    assert result.event_count == 4
-    assert result.weights.cover_chroma > DEFAULT_WEIGHTS.cover_chroma
+    assert result.event_count == 2
+    assert sum(getattr(result.weights, field_name) for field_name in WEIGHT_FIELDS) == 1.0

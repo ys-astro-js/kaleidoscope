@@ -3,8 +3,8 @@ import {
   SEGMENT_HOP_SECONDS,
   SEGMENT_WINDOW_SECONDS,
   TRACK_AUTOPLAY_HIGHLIGHT_SECONDS,
+  endingSegmentIndexForTime,
   segmentIndexForTime,
-  segmentWindowIndexForTime,
   type RoutePreview,
   type TrackAutoplayPreview,
 } from "../autoplay";
@@ -39,14 +39,27 @@ export function useAppDerivedState({
     () => {
       const index =
         similarityMode === "segment"
-          ? segmentWindowIndexForTime(currentTime)
+          ? endingSegmentIndexForTime(currentTime)
           : segmentIndexForTime(currentTime);
       if (
         similarityMode === "segment" &&
         routePreview?.trackId === selectedId &&
-        currentTime < routePreview.segmentIndex * SEGMENT_HOP_SECONDS + SEGMENT_WINDOW_SECONDS
+        currentTime >= routePreview.segmentIndex * SEGMENT_HOP_SECONDS
       ) {
-        return routePreview.segmentIndex;
+        const routeStartSeconds = routePreview.segmentIndex * SEGMENT_HOP_SECONDS;
+        const routeEndSeconds =
+          routeStartSeconds + SEGMENT_WINDOW_SECONDS;
+        const offset =
+          currentTime < routeEndSeconds
+            ? 0
+            : Math.floor((currentTime - routeEndSeconds) / SEGMENT_HOP_SECONDS) + 1;
+        const routeBasedIndex = routePreview.segmentIndex + offset;
+        if (currentTime < routeEndSeconds) {
+          return routePreview.segmentIndex;
+        }
+        return selectedSegmentCount > 0
+          ? Math.min(routeBasedIndex, selectedSegmentCount - 1)
+          : routeBasedIndex;
       }
       if (selectedSegmentCount <= 0) {
         return index;

@@ -1,4 +1,4 @@
-import type { FeedbackLabel, SimilarSegment, Track } from "./types";
+import type { AudioStem, FeedbackLabel, SimilarSegment, Track } from "./types";
 
 export async function fetchTracks(): Promise<Track[]> {
   const response = await fetch("/api/tracks");
@@ -79,8 +79,15 @@ export async function submitFeedback(
   }
 }
 
-export function audioUrl(trackId: string): string {
-  return `/api/tracks/${trackId}/audio`;
+export function audioUrl(trackId: string, stem: AudioStem = "original"): string {
+  if (stem === "original") {
+    return `/api/tracks/${trackId}/audio`;
+  }
+  return `/api/tracks/${trackId}/audio?stem=${encodeURIComponent(stem)}`;
+}
+
+export function resolveAudioStem(track: Track, stem: AudioStem): AudioStem {
+  return track.available_stems.includes(stem) ? stem : "original";
 }
 
 export function artUrl(trackId: string): string {

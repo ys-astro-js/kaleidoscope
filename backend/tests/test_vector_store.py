@@ -1,9 +1,12 @@
 from pathlib import Path
 
 from app.vector_store import (
-    COVER_CHROMA_KIND,
     GLOBAL_SEMANTIC_KIND,
+    INSTRUMENTAL_GLOBAL_SEMANTIC_KIND,
+    INSTRUMENTAL_SEGMENT_SEMANTIC_KIND,
     SEGMENT_SEMANTIC_KIND,
+    VOCALS_GLOBAL_SEMANTIC_KIND,
+    VOCALS_SEGMENT_SEMANTIC_KIND,
     EmbeddingRecord,
     SimilarityWeights,
     VectorStore,
@@ -18,13 +21,41 @@ def segment_semantic(index: int, vector: list[float]) -> EmbeddingRecord:
     return EmbeddingRecord(kind=SEGMENT_SEMANTIC_KIND, segment_index=index, vector=vector)
 
 
-def cover_chroma(vector: list[float]) -> EmbeddingRecord:
-    return EmbeddingRecord(kind=COVER_CHROMA_KIND, segment_index=-1, vector=vector)
+def vocals_global(vector: list[float]) -> EmbeddingRecord:
+    return EmbeddingRecord(kind=VOCALS_GLOBAL_SEMANTIC_KIND, segment_index=-1, vector=vector)
 
 
-def test_similar_combines_global_segment_and_chroma_scores(monkeypatch) -> None:
+def vocals_segment(index: int, vector: list[float]) -> EmbeddingRecord:
+    return EmbeddingRecord(kind=VOCALS_SEGMENT_SEMANTIC_KIND, segment_index=index, vector=vector)
+
+
+def instrumental_global(vector: list[float]) -> EmbeddingRecord:
+    return EmbeddingRecord(kind=INSTRUMENTAL_GLOBAL_SEMANTIC_KIND, segment_index=-1, vector=vector)
+
+
+def instrumental_segment(index: int, vector: list[float]) -> EmbeddingRecord:
+    return EmbeddingRecord(
+        kind=INSTRUMENTAL_SEGMENT_SEMANTIC_KIND,
+        segment_index=index,
+        vector=vector,
+    )
+
+
+def weights(**overrides: float) -> SimilarityWeights:
+    values = {
+        "global_semantic": 0.0,
+        "segment_semantic": 0.0,
+        "vocals_global_semantic": 0.0,
+        "vocals_segment_semantic": 0.0,
+        "instrumental_global_semantic": 0.0,
+        "instrumental_segment_semantic": 0.0,
+    }
+    values.update(overrides)
+    return SimilarityWeights(**values)
+
+
+def test_similar_uses_global_and_segment_scores(monkeypatch) -> None:
     store = VectorStore(Path("unused"))
-    chroma = [1.0, 1.0, *([0.0] * 10)]
     monkeypatch.setattr(
         store,
         "all_embeddings",
@@ -32,17 +63,14 @@ def test_similar_combines_global_segment_and_chroma_scores(monkeypatch) -> None:
             "selected": [
                 global_semantic([1.0, 0.0]),
                 segment_semantic(0, [1.0, 0.0]),
-                cover_chroma(chroma),
             ],
             "close": [
                 global_semantic([0.95, 0.05]),
                 segment_semantic(0, [0.9, 0.1]),
-                cover_chroma([0.0, 0.0, 1.0, 1.0, *([0.0] * 8)]),
             ],
             "far": [
                 global_semantic([0.0, 1.0]),
                 segment_semantic(0, [0.0, 1.0]),
-                cover_chroma([1.0] * 12),
             ],
         },
     )
@@ -75,11 +103,8 @@ def test_similar_uses_top3_segment_mean_instead_of_single_best_hit(monkeypatch) 
     assert [track["id"] for track in similar] == ["consistent", "one_hit"]
 
 
-def test_chroma_cover_score_can_lift_cover_candidate(monkeypatch) -> None:
+def test_custom_weights_change_similarity_ranking(monkeypatch) -> None:
     store = VectorStore(Path("unused"))
-    selected_chroma = [1.0, 1.0, *([0.0] * 10)]
-    shifted_cover_chroma = [0.0, 0.0, 0.0, 1.0, 1.0, *([0.0] * 7)]
-    different_chroma = [1.0, 0.0, 1.0, *([0.0] * 9)]
     monkeypatch.setattr(
         store,
         "all_embeddings",
@@ -87,46 +112,11 @@ def test_chroma_cover_score_can_lift_cover_candidate(monkeypatch) -> None:
             "selected": [
                 global_semantic([1.0, 0.0]),
                 segment_semantic(0, [1.0, 0.0]),
-                cover_chroma(selected_chroma),
             ],
-            "cover": [
-                global_semantic([0.8, 0.6]),
-                segment_semantic(0, [0.8, 0.6]),
-                cover_chroma(shifted_cover_chroma),
-            ],
-            "same_genre": [
-                global_semantic([0.9, 0.435]),
-                segment_semantic(0, [0.9, 0.435]),
-                cover_chroma(different_chroma),
-            ],
-        },
-    )
-
-    similar = store.similar("selected", limit=2)
-
-    assert [track["id"] for track in similar] == ["cover", "same_genre"]
-
-
-def test_custom_weights_change_similarity_ranking(monkeypatch) -> None:
-    store = VectorStore(Path("unused"))
-    selected_chroma = [1.0, 1.0, *([0.0] * 10)]
-    matching_chroma = [0.0, 0.0, 1.0, 1.0, *([0.0] * 8)]
-    different_chroma = [1.0, 0.0, 1.0, *([0.0] * 9)]
-    monkeypatch.setattr(
-        store,
-        "all_embeddings",
-        lambda: {
-            "selected": [
-                global_semantic([1.0, 0.0]),
-                cover_chroma(selected_chroma),
-            ],
-            "semantic": [
-                global_semantic([1.0, 0.0]),
-                cover_chroma(different_chroma),
-            ],
-            "cover": [
+            "semantic": [global_semantic([1.0, 0.0])],
+            "segment": [
                 global_semantic([0.0, 1.0]),
-                cover_chroma(matching_chroma),
+                segment_semantic(0, [1.0, 0.0]),
             ],
         },
     )
@@ -134,53 +124,50 @@ def test_custom_weights_change_similarity_ranking(monkeypatch) -> None:
     semantic_first = store.similar(
         "selected",
         limit=2,
-        weights=SimilarityWeights(global_semantic=1.0, segment_semantic=0.0, cover_chroma=0.0),
+        weights=weights(global_semantic=1.0),
     )
-    chroma_first = store.similar(
+    segment_first = store.similar(
         "selected",
         limit=2,
-        weights=SimilarityWeights(global_semantic=0.0, segment_semantic=0.0, cover_chroma=1.0),
+        weights=weights(segment_semantic=1.0),
     )
 
     assert semantic_first[0]["id"] == "semantic"
-    assert chroma_first[0]["id"] == "cover"
+    assert segment_first[0]["id"] == "segment"
 
 
 def test_similarity_matrix_uses_same_weighted_scores_as_similar(monkeypatch) -> None:
     store = VectorStore(Path("unused"))
-    selected_chroma = [1.0, 1.0, *([0.0] * 10)]
-    matching_chroma = [0.0, 0.0, 1.0, 1.0, *([0.0] * 8)]
-    different_chroma = [1.0, 0.0, 1.0, *([0.0] * 9)]
     monkeypatch.setattr(
         store,
         "all_embeddings",
         lambda: {
             "selected": [
                 global_semantic([1.0, 0.0]),
-                cover_chroma(selected_chroma),
+                segment_semantic(0, [1.0, 0.0]),
             ],
             "semantic": [
                 global_semantic([1.0, 0.0]),
-                cover_chroma(different_chroma),
+                segment_semantic(0, [0.0, 1.0]),
             ],
-            "cover": [
+            "segment": [
                 global_semantic([0.0, 1.0]),
-                cover_chroma(matching_chroma),
+                segment_semantic(0, [1.0, 0.0]),
             ],
         },
     )
 
     semantic_matrix = store.similarity_matrix(
-        weights=SimilarityWeights(global_semantic=1.0, segment_semantic=0.0, cover_chroma=0.0),
+        weights=weights(global_semantic=1.0),
     )
-    chroma_matrix = store.similarity_matrix(
-        weights=SimilarityWeights(global_semantic=0.0, segment_semantic=0.0, cover_chroma=1.0),
+    segment_matrix = store.similarity_matrix(
+        weights=weights(segment_semantic=1.0),
     )
 
     assert semantic_matrix["selected"]["selected"] == 1.0
     assert semantic_matrix["selected"]["semantic"] == semantic_matrix["semantic"]["selected"]
-    assert semantic_matrix["selected"]["semantic"] > semantic_matrix["selected"]["cover"]
-    assert chroma_matrix["selected"]["cover"] > chroma_matrix["selected"]["semantic"]
+    assert semantic_matrix["selected"]["semantic"] > semantic_matrix["selected"]["segment"]
+    assert segment_matrix["selected"]["segment"] > segment_matrix["selected"]["semantic"]
 
 
 def test_similar_segments_returns_best_segment_per_track(monkeypatch) -> None:
@@ -229,3 +216,74 @@ def test_segment_counts_counts_stored_segment_embeddings(monkeypatch) -> None:
     )
 
     assert store.segment_counts() == {"selected": 2, "empty": 0}
+
+
+def test_stem_features_can_change_similarity_ranking(monkeypatch) -> None:
+    store = VectorStore(Path("unused"))
+    monkeypatch.setattr(
+        store,
+        "all_embeddings",
+        lambda: {
+            "selected": [
+                global_semantic([1.0, 0.0]),
+                vocals_global([1.0, 0.0]),
+                vocals_segment(0, [1.0, 0.0]),
+                instrumental_global([0.0, 1.0]),
+                instrumental_segment(0, [0.0, 1.0]),
+            ],
+            "vocal_cover": [
+                global_semantic([0.0, 1.0]),
+                vocals_global([1.0, 0.0]),
+                vocals_segment(0, [1.0, 0.0]),
+                instrumental_global([1.0, 0.0]),
+                instrumental_segment(0, [1.0, 0.0]),
+            ],
+            "instrumental_cover": [
+                global_semantic([0.0, 1.0]),
+                vocals_global([0.0, 1.0]),
+                vocals_segment(0, [0.0, 1.0]),
+                instrumental_global([0.0, 1.0]),
+                instrumental_segment(0, [0.0, 1.0]),
+            ],
+        },
+    )
+
+    vocal_first = store.similar(
+        "selected",
+        limit=2,
+        weights=weights(vocals_global_semantic=1.0, vocals_segment_semantic=1.0),
+    )
+    instrumental_first = store.similar(
+        "selected",
+        limit=2,
+        weights=weights(
+            instrumental_global_semantic=1.0,
+            instrumental_segment_semantic=1.0,
+        ),
+    )
+
+    assert vocal_first[0]["id"] == "vocal_cover"
+    assert instrumental_first[0]["id"] == "instrumental_cover"
+
+
+def test_similar_segments_ignores_stem_segments(monkeypatch) -> None:
+    store = VectorStore(Path("unused"))
+    monkeypatch.setattr(
+        store,
+        "all_embeddings",
+        lambda: {
+            "selected": [
+                segment_semantic(0, [1.0, 0.0]),
+                vocals_segment(0, [0.0, 1.0]),
+            ],
+            "whole_match": [segment_semantic(0, [1.0, 0.0])],
+            "stem_only_match": [
+                segment_semantic(0, [0.0, 1.0]),
+                vocals_segment(0, [0.0, 1.0]),
+            ],
+        },
+    )
+
+    similar = store.similar_segments("selected", 0, limit=2)
+
+    assert similar[0]["id"] == "whole_match"

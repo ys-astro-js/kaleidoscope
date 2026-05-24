@@ -106,8 +106,6 @@ def test_embed_file_returns_segment_and_average_embeddings(monkeypatch) -> None:
     import librosa
     import torch
 
-    chroma = [1.0, *([0.0] * 11)]
-
     class FakeModel:
         def __call__(self, wavs, output_hidden_states):
             mean = wavs.mean()
@@ -120,13 +118,11 @@ def test_embed_file_returns_segment_and_average_embeddings(monkeypatch) -> None:
     embedder = MuQEmbedder("unused", sample_rate=1)
     monkeypatch.setattr(librosa, "load", lambda path, sr, mono: (np.arange(60, dtype=np.float32), sr))
     monkeypatch.setattr(embedder, "_load", lambda: (FakeModel(), "cpu"))
-    monkeypatch.setattr("app.embedding.compute_cover_chroma", lambda wav, sample_rate: chroma)
 
     embeddings = embedder.embed_file("long.wav")
 
     assert len(embeddings.segment_semantic) == 3
     assert len(embeddings.global_semantic) == 2
-    assert embeddings.cover_chroma == chroma
     assert embeddings.segments == embeddings.segment_semantic
     assert embeddings.average == embeddings.global_semantic
     assert np.allclose(embeddings.global_semantic, normalize_vector(np.asarray([0.5, 0.5])))

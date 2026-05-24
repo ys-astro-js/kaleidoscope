@@ -4,23 +4,30 @@ from math import log
 from typing import Any
 
 from app.vector_store import (
-    DEFAULT_CHROMA_WEIGHT,
+    DEFAULT_INSTRUMENTAL_GLOBAL_WEIGHT,
+    DEFAULT_INSTRUMENTAL_SEGMENT_WEIGHT,
     DEFAULT_GLOBAL_WEIGHT,
     DEFAULT_SEGMENT_WEIGHT,
+    DEFAULT_VOCALS_GLOBAL_WEIGHT,
+    DEFAULT_VOCALS_SEGMENT_WEIGHT,
     SimilarityFeatureScores,
     SimilarityWeights,
     VectorStore,
+    WEIGHT_FIELDS,
     score_from_features,
 )
 
-MIN_TRAINING_EVENTS = 4
-GRID_UNITS = 10
-PRIOR_EVENT_STRENGTH = 6.0
+MIN_TRAINING_EVENTS = 1
+GRID_UNITS = 20
+PRIOR_EVENT_STRENGTH = 2.0
 EPSILON = 1e-6
 DEFAULT_WEIGHTS = SimilarityWeights(
     global_semantic=DEFAULT_GLOBAL_WEIGHT,
     segment_semantic=DEFAULT_SEGMENT_WEIGHT,
-    cover_chroma=DEFAULT_CHROMA_WEIGHT,
+    vocals_global_semantic=DEFAULT_VOCALS_GLOBAL_WEIGHT,
+    vocals_segment_semantic=DEFAULT_VOCALS_SEGMENT_WEIGHT,
+    instrumental_global_semantic=DEFAULT_INSTRUMENTAL_GLOBAL_WEIGHT,
+    instrumental_segment_semantic=DEFAULT_INSTRUMENTAL_SEGMENT_WEIGHT,
 )
 
 
@@ -52,7 +59,7 @@ def learn_feedback_weights(
         return FeedbackTrainingResult(weights=DEFAULT_WEIGHTS, event_count=len(examples))
 
     best_weights = min(
-        _candidate_weights(),
+        _candidate_weights(examples),
         key=lambda weights: _binary_cross_entropy(examples, weights),
     )
     return FeedbackTrainingResult(
@@ -61,20 +68,50 @@ def learn_feedback_weights(
     )
 
 
-def _candidate_weights() -> list[SimilarityWeights]:
+def _candidate_weights(
+    examples: list[tuple[SimilarityFeatureScores, int]],
+) -> list[SimilarityWeights]:
+    available = _available_features(examples)
     candidates = []
-    for global_units in range(GRID_UNITS + 1):
-        remaining = GRID_UNITS - global_units
-        for segment_units in range(remaining + 1):
-            chroma_units = remaining - segment_units
-            candidates.append(
-                SimilarityWeights(
-                    global_semantic=global_units / GRID_UNITS,
-                    segment_semantic=segment_units / GRID_UNITS,
-                    cover_chroma=chroma_units / GRID_UNITS,
-                )
+    seen: set[tuple[float, ...]] = set()
+    available_fields = [
+        field_name
+        for field_name in WEIGHT_FIELDS
+        if getattr(available, field_name) > 0.0
+    ]
+    if not available_fields:
+        return [DEFAULT_WEIGHTS]
+
+    for units_by_field in _weight_unit_allocations(available_fields):
+        weights = _normalize_weights(
+            SimilarityWeights(
+                **{
+                    field_name: units_by_field.get(field_name, 0) / GRID_UNITS
+                    for field_name in WEIGHT_FIELDS
+                }
             )
+        )
+        key = tuple(getattr(weights, field_name) for field_name in WEIGHT_FIELDS)
+        if key in seen:
+            continue
+        candidates.append(weights)
+        seen.add(key)
     return candidates
+
+
+def _available_features(
+    examples: list[tuple[SimilarityFeatureScores, int]],
+) -> SimilarityWeights:
+    return SimilarityWeights(
+        **{
+            field_name: (
+                1.0
+                if any(getattr(features, field_name) is not None for features, _ in examples)
+                else 0.0
+            )
+            for field_name in WEIGHT_FIELDS
+        }
+    )
 
 
 def _binary_cross_entropy(
@@ -99,31 +136,40 @@ def _blend_with_default(
     total_strength = learned_strength + PRIOR_EVENT_STRENGTH
     return _normalize_weights(
         SimilarityWeights(
-            global_semantic=(
-                weights.global_semantic * learned_strength
-                + DEFAULT_WEIGHTS.global_semantic * PRIOR_EVENT_STRENGTH
-            )
-            / total_strength,
-            segment_semantic=(
-                weights.segment_semantic * learned_strength
-                + DEFAULT_WEIGHTS.segment_semantic * PRIOR_EVENT_STRENGTH
-            )
-            / total_strength,
-            cover_chroma=(
-                weights.cover_chroma * learned_strength
-                + DEFAULT_WEIGHTS.cover_chroma * PRIOR_EVENT_STRENGTH
-            )
-            / total_strength,
+            **{
+                field_name: (
+                    getattr(weights, field_name) * learned_strength
+                    + getattr(DEFAULT_WEIGHTS, field_name) * PRIOR_EVENT_STRENGTH
+                )
+                / total_strength
+                for field_name in WEIGHT_FIELDS
+            }
         )
     )
 
 
 def _normalize_weights(weights: SimilarityWeights) -> SimilarityWeights:
-    total = weights.global_semantic + weights.segment_semantic + weights.cover_chroma
+    total = sum(getattr(weights, field_name) for field_name in WEIGHT_FIELDS)
     if total <= 0.0:
         return DEFAULT_WEIGHTS
     return SimilarityWeights(
-        global_semantic=weights.global_semantic / total,
-        segment_semantic=weights.segment_semantic / total,
-        cover_chroma=weights.cover_chroma / total,
+        **{
+            field_name: getattr(weights, field_name) / total
+            for field_name in WEIGHT_FIELDS
+        }
     )
+
+
+def _weight_unit_allocations(fields: list[str]) -> list[dict[str, int]]:
+    allocations: list[dict[str, int]] = []
+
+    def visit(index: int, remaining: int, current: dict[str, int]) -> None:
+        if index == len(fields) - 1:
+            allocations.append({**current, fields[index]: remaining})
+            return
+        field_name = fields[index]
+        for units in range(remaining + 1):
+            visit(index + 1, remaining - units, {**current, field_name: units})
+
+    visit(0, GRID_UNITS, {})
+    return allocations

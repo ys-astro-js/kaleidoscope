@@ -6,6 +6,14 @@ from typing import Any
 from app.models import FeedbackLabel, TrackStatus
 
 FEEDBACK_WEIGHTS_ID = "global"
+DEFAULT_FEEDBACK_WEIGHT_VALUES = {
+    "global_weight": 0.34375,
+    "segment_weight": 0.15625,
+    "vocals_global_weight": 0.171875,
+    "vocals_segment_weight": 0.078125,
+    "instrumental_global_weight": 0.171875,
+    "instrumental_segment_weight": 0.078125,
+}
 
 
 def connect(sqlite_path: Path) -> sqlite3.Connection:
@@ -41,6 +49,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     _ensure_track_column(conn, "cluster", "INTEGER")
     _ensure_track_column(conn, "album", "TEXT")
+    _ensure_track_column(conn, "vocals_path", "TEXT")
+    _ensure_track_column(conn, "instrumental_path", "TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS feedback_events (
@@ -59,12 +69,16 @@ def init_db(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             global_weight REAL NOT NULL,
             segment_weight REAL NOT NULL,
-            chroma_weight REAL NOT NULL,
+            vocals_global_weight REAL NOT NULL,
+            vocals_segment_weight REAL NOT NULL,
+            instrumental_global_weight REAL NOT NULL,
+            instrumental_segment_weight REAL NOT NULL,
             event_count INTEGER NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    _normalize_feedback_weights_schema(conn)
     conn.commit()
 
 
@@ -95,6 +109,8 @@ def update_track(
     artist: str | None = None,
     album: str | None = None,
     art_path: Path | None = None,
+    vocals_path: Path | None = None,
+    instrumental_path: Path | None = None,
     error: str | None = None,
     coords: tuple[float, float, float] | None = None,
 ) -> None:
@@ -112,6 +128,12 @@ def update_track(
     if art_path is not None:
         fields.append("art_path = ?")
         values.append(str(art_path))
+    if vocals_path is not None:
+        fields.append("vocals_path = ?")
+        values.append(str(vocals_path))
+    if instrumental_path is not None:
+        fields.append("instrumental_path = ?")
+        values.append(str(instrumental_path))
     if error is not None:
         fields.append("error = ?")
         values.append(error)
@@ -217,7 +239,14 @@ def delete_feedback_for_track(
 def get_feedback_weights(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute(
         """
-        SELECT global_weight, segment_weight, chroma_weight, event_count
+        SELECT
+            global_weight,
+            segment_weight,
+            vocals_global_weight,
+            vocals_segment_weight,
+            instrumental_global_weight,
+            instrumental_segment_weight,
+            event_count
         FROM feedback_weights
         WHERE id = ?
         """,
@@ -230,7 +259,10 @@ def set_feedback_weights(
     *,
     global_weight: float,
     segment_weight: float,
-    chroma_weight: float,
+    vocals_global_weight: float,
+    vocals_segment_weight: float,
+    instrumental_global_weight: float,
+    instrumental_segment_weight: float,
     event_count: int,
 ) -> None:
     conn.execute(
@@ -239,15 +271,21 @@ def set_feedback_weights(
             id,
             global_weight,
             segment_weight,
-            chroma_weight,
+            vocals_global_weight,
+            vocals_segment_weight,
+            instrumental_global_weight,
+            instrumental_segment_weight,
             event_count,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(id) DO UPDATE SET
             global_weight = excluded.global_weight,
             segment_weight = excluded.segment_weight,
-            chroma_weight = excluded.chroma_weight,
+            vocals_global_weight = excluded.vocals_global_weight,
+            vocals_segment_weight = excluded.vocals_segment_weight,
+            instrumental_global_weight = excluded.instrumental_global_weight,
+            instrumental_segment_weight = excluded.instrumental_segment_weight,
             event_count = excluded.event_count,
             updated_at = CURRENT_TIMESTAMP
         """,
@@ -255,7 +293,10 @@ def set_feedback_weights(
             FEEDBACK_WEIGHTS_ID,
             global_weight,
             segment_weight,
-            chroma_weight,
+            vocals_global_weight,
+            vocals_segment_weight,
+            instrumental_global_weight,
+            instrumental_segment_weight,
             event_count,
         ),
     )
@@ -270,3 +311,81 @@ def _ensure_track_column(conn: sqlite3.Connection, column: str, definition: str)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
     if column not in columns:
         conn.execute(f"ALTER TABLE tracks ADD COLUMN {column} {definition}")
+
+
+def _normalize_feedback_weights_schema(conn: sqlite3.Connection) -> None:
+    expected_columns = {
+        "id",
+        "global_weight",
+        "segment_weight",
+        "vocals_global_weight",
+        "vocals_segment_weight",
+        "instrumental_global_weight",
+        "instrumental_segment_weight",
+        "event_count",
+        "updated_at",
+    }
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(feedback_weights)")}
+    if columns == expected_columns:
+        return
+
+    preserved_rows = [dict(row) for row in conn.execute("SELECT * FROM feedback_weights")]
+    conn.execute("ALTER TABLE feedback_weights RENAME TO feedback_weights_legacy")
+    conn.execute(
+        """
+        CREATE TABLE feedback_weights (
+            id TEXT PRIMARY KEY,
+            global_weight REAL NOT NULL,
+            segment_weight REAL NOT NULL,
+            vocals_global_weight REAL NOT NULL,
+            vocals_segment_weight REAL NOT NULL,
+            instrumental_global_weight REAL NOT NULL,
+            instrumental_segment_weight REAL NOT NULL,
+            event_count INTEGER NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO feedback_weights (
+            id,
+            global_weight,
+            segment_weight,
+            vocals_global_weight,
+            vocals_segment_weight,
+            instrumental_global_weight,
+            instrumental_segment_weight,
+            event_count,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                row["id"],
+                row.get("global_weight", DEFAULT_FEEDBACK_WEIGHT_VALUES["global_weight"]),
+                row.get("segment_weight", DEFAULT_FEEDBACK_WEIGHT_VALUES["segment_weight"]),
+                row.get(
+                    "vocals_global_weight",
+                    DEFAULT_FEEDBACK_WEIGHT_VALUES["vocals_global_weight"],
+                ),
+                row.get(
+                    "vocals_segment_weight",
+                    DEFAULT_FEEDBACK_WEIGHT_VALUES["vocals_segment_weight"],
+                ),
+                row.get(
+                    "instrumental_global_weight",
+                    DEFAULT_FEEDBACK_WEIGHT_VALUES["instrumental_global_weight"],
+                ),
+                row.get(
+                    "instrumental_segment_weight",
+                    DEFAULT_FEEDBACK_WEIGHT_VALUES["instrumental_segment_weight"],
+                ),
+                row.get("event_count", 0),
+                row.get("updated_at", "CURRENT_TIMESTAMP"),
+            )
+            for row in preserved_rows
+        ],
+    )
+    conn.execute("DROP TABLE feedback_weights_legacy")

@@ -17,6 +17,11 @@ export type RoutePreview = SegmentVisit & {
   nextTrackId: string | null;
 };
 
+export type SegmentAutoplayPreview = SegmentVisit & {
+  match: SimilarSegment;
+  nextTrackId: string;
+};
+
 export type TrackAutoplayPreview = SegmentVisit & {
   match: SimilarSegment;
   nextTrackId: string;
@@ -35,8 +40,12 @@ export function segmentIndexForTime(timeSeconds: number): number {
   return Math.max(0, Math.floor(timeSeconds / SEGMENT_HOP_SECONDS));
 }
 
-export function segmentWindowIndexForTime(timeSeconds: number): number {
-  return segmentIndexForTime(Math.floor(Math.max(0, timeSeconds) / SEGMENT_WINDOW_SECONDS) * SEGMENT_WINDOW_SECONDS);
+export function endingSegmentIndexForTime(timeSeconds: number): number {
+  const clampedTime = Math.max(0, timeSeconds);
+  if (clampedTime < SEGMENT_WINDOW_SECONDS) {
+    return 0;
+  }
+  return Math.floor((clampedTime - SEGMENT_WINDOW_SECONDS) / SEGMENT_HOP_SECONDS) + 1;
 }
 
 export function withHistoryVisit(history: SegmentVisit[], visit: SegmentVisit): SegmentVisit[] {
@@ -142,6 +151,17 @@ export function trackAutoplaySourceSegmentIndexes(
     { length: lastEmbeddableSegmentIndex(duration) + 1 },
     (_, index) => lastEmbeddableSegmentIndex(duration) - index
   );
+}
+
+export function segmentAutoplaySourceSegmentIndex(
+  currentSegmentIndex: number,
+  storedSegmentCount: number
+): number {
+  const targetSegmentIndex = currentSegmentIndex + 2;
+  if (storedSegmentCount > 0) {
+    return Math.min(targetSegmentIndex, storedSegmentCount - 1);
+  }
+  return targetSegmentIndex;
 }
 
 export function segmentEndSeconds(segmentIndex: number, duration: number): number {
