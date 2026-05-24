@@ -287,3 +287,35 @@ def test_similar_segments_ignores_stem_segments(monkeypatch) -> None:
     similar = store.similar_segments("selected", 0, limit=2)
 
     assert similar[0]["id"] == "whole_match"
+
+
+def test_segment_coverage_matrix_requires_multiple_whole_segment_matches(monkeypatch) -> None:
+    store = VectorStore(Path("unused"))
+    monkeypatch.setattr(
+        store,
+        "all_embeddings",
+        lambda: {
+            "selected": [
+                segment_semantic(0, [1.0, 0.0]),
+                segment_semantic(1, [0.0, 1.0]),
+            ],
+            "one_hit": [
+                segment_semantic(0, [1.0, 0.0]),
+                segment_semantic(1, [1.0, 0.0]),
+            ],
+            "covered": [
+                segment_semantic(0, [1.0, 0.0]),
+                segment_semantic(1, [0.0, 1.0]),
+            ],
+            "stem_only": [
+                segment_semantic(0, [1.0, 0.0]),
+                vocals_segment(0, [0.0, 1.0]),
+            ],
+        },
+    )
+
+    matrix = store.segment_coverage_matrix()
+
+    assert matrix["selected"]["covered"] == 1.0
+    assert matrix["selected"]["covered"] > matrix["selected"]["one_hit"]
+    assert matrix["selected"]["covered"] > matrix["selected"]["stem_only"]

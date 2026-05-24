@@ -4,6 +4,7 @@ import {
   type SyntheticEvent,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -15,7 +16,7 @@ import {
   type SegmentVisit,
   type TrackAutoplayPreview,
 } from "../autoplay";
-import type { AudioDeck } from "../components/NowPlaying";
+import type { AudioDeck, AudioDeckRefs } from "../components/NowPlaying";
 import type { AudioStem, SimilarSegment, SimilarityMode, Track } from "../types";
 
 type MutableRef<T> = {
@@ -49,6 +50,10 @@ type UseAudioPlaybackOptions = {
   ) => RoutePreview;
 };
 
+const AUDIO_DECKS: AudioDeck[] = ["primary", "secondary"];
+const AUDIO_STEMS: AudioStem[] = ["original", "vocals", "instrumental"];
+const SYNC_DRIFT_SECONDS = 0.08;
+
 export function useAudioPlayback({
   selected,
   playbackStem,
@@ -65,30 +70,116 @@ export function useAudioPlayback({
   recordAutoplayVisit,
   buildRoutePreviewFromHistory,
 }: UseAudioPlaybackOptions) {
-  const primaryAudioRef = useRef<HTMLAudioElement | null>(null);
-  const secondaryAudioRef = useRef<HTMLAudioElement | null>(null);
+  const primaryOriginalAudioRef = useRef<HTMLAudioElement | null>(null);
+  const primaryVocalsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const primaryInstrumentalAudioRef = useRef<HTMLAudioElement | null>(null);
+  const secondaryOriginalAudioRef = useRef<HTMLAudioElement | null>(null);
+  const secondaryVocalsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const secondaryInstrumentalAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRefs = useMemo<AudioDeckRefs>(() => ({
+    primary: {
+      original: primaryOriginalAudioRef,
+      vocals: primaryVocalsAudioRef,
+      instrumental: primaryInstrumentalAudioRef,
+    },
+    secondary: {
+      original: secondaryOriginalAudioRef,
+      vocals: secondaryVocalsAudioRef,
+      instrumental: secondaryInstrumentalAudioRef,
+    },
+  }), []);
+
   const [activeDeck, setActiveDeck] = useState<AudioDeck>("primary");
   const activeDeckRef = useRef<AudioDeck>("primary");
   const fadeFrameRef = useRef<number | null>(null);
   const fadeIntervalRef = useRef<number | null>(null);
   const fadeTimeoutRef = useRef<number | null>(null);
   const isCrossfadingRef = useRef(false);
+  const playbackStemRef = useRef<AudioStem>(playbackStem);
+  const deckTracksRef = useRef<Record<AudioDeck, Track | null>>({
+    primary: null,
+    secondary: null,
+  });
+  const deckVolumeRef = useRef<Record<AudioDeck, number>>({
+    primary: 1,
+    secondary: 0,
+  });
+  const deckLoadIdRef = useRef<Record<AudioDeck, number>>({
+    primary: 0,
+    secondary: 0,
+  });
+  const isPlayingRef = useRef(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [currentDuration, setCurrentDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  const getAudio = useCallback((deck: AudioDeck): HTMLAudioElement | null =>
-    deck === "primary" ? primaryAudioRef.current : secondaryAudioRef.current, []);
+  const setPlaybackState = useCallback((playing: boolean) => {
+    isPlayingRef.current = playing;
+    setIsPlaying(playing);
+  }, []);
 
-  const trackAudioUrl = useCallback((track: Track): string =>
-    audioUrl(track.id, resolveAudioStem(track, playbackStem)), [playbackStem]);
+  const getStemAudio = useCallback((deck: AudioDeck, stem: AudioStem): HTMLAudioElement | null =>
+    audioRefs[deck][stem].current, [audioRefs]);
+
+  const getDeckAudios = useCallback((deck: AudioDeck): HTMLAudioElement[] =>
+    AUDIO_STEMS.flatMap((stem) => {
+      const audio = getStemAudio(deck, stem);
+      return audio ? [audio] : [];
+    }), [getStemAudio]);
+
+  const getAllAudios = useCallback((): HTMLAudioElement[] =>
+    AUDIO_DECKS.flatMap((deck) => getDeckAudios(deck)), [getDeckAudios]);
+
+  const resolvedStemForDeck = useCallback((deck: AudioDeck): AudioStem => {
+    const track = deckTracksRef.current[deck];
+    return track ? resolveAudioStem(track, playbackStemRef.current) : "original";
+  }, []);
+
+  const getAudio = useCallback((deck: AudioDeck): HTMLAudioElement | null =>
+    getStemAudio(deck, resolvedStemForDeck(deck)), [getStemAudio, resolvedStemForDeck]);
+
+  const isDeckPlaying = useCallback((deck: AudioDeck): boolean => {
+    const audio = getAudio(deck);
+    return Boolean(audio && hasAudioSource(audio) && !audio.paused);
+  }, [getAudio]);
+
+  const applyDeckVolume = useCallback((deck: AudioDeck) => {
+    const activeStem = resolvedStemForDeck(deck);
+    const deckVolume = deckVolumeRef.current[deck];
+    for (const stem of AUDIO_STEMS) {
+      const audio = getStemAudio(deck, stem);
+      if (audio) {
+        audio.volume = stem === activeStem ? deckVolume : 0;
+      }
+    }
+  }, [getStemAudio, resolvedStemForDeck]);
+
+  const applyAllDeckVolumes = useCallback(() => {
+    for (const deck of AUDIO_DECKS) {
+      applyDeckVolume(deck);
+    }
+  }, [applyDeckVolume]);
+
+  const pauseDeck = useCallback((deck: AudioDeck) => {
+    for (const audio of getDeckAudios(deck)) {
+      audio.pause();
+    }
+  }, [getDeckAudios]);
+
+  const playDeck = useCallback(async (deck: AudioDeck): Promise<boolean> => {
+    const audios = getDeckAudios(deck).filter(hasAudioSource);
+    if (audios.length === 0) {
+      return false;
+    }
+    await Promise.all(audios.map((audio) => audio.play().catch(() => undefined)));
+    return isDeckPlaying(deck);
+  }, [getDeckAudios, isDeckPlaying]);
 
   const activateDeck = useCallback((deck: AudioDeck) => {
     activeDeckRef.current = deck;
     setActiveDeck(deck);
-    const audio = getAudio(deck);
-    setIsPlaying(Boolean(audio && !audio.paused));
-  }, [getAudio]);
+    setPlaybackState(isDeckPlaying(deck));
+  }, [isDeckPlaying, setPlaybackState]);
 
   const cancelFade = useCallback(() => {
     if (fadeFrameRef.current !== null) {
@@ -108,37 +199,123 @@ export function useAudioPlayback({
 
   const pauseAllAudio = useCallback(() => {
     cancelFade();
-    pauseAudio(primaryAudioRef.current);
-    pauseAudio(secondaryAudioRef.current);
-    setIsPlaying(false);
-  }, [cancelFade]);
+    for (const deck of AUDIO_DECKS) {
+      pauseDeck(deck);
+    }
+    setPlaybackState(false);
+  }, [cancelFade, pauseDeck, setPlaybackState]);
 
-  useEffect(() => {
-    const syncPlaybackState = () => {
-      const audio = getAudio(activeDeckRef.current);
-      setIsPlaying(Boolean(audio && !audio.paused));
+  const setDeckCurrentTime = useCallback((
+    deck: AudioDeck,
+    seconds: number,
+    loadId?: number
+  ) => {
+    for (const audio of getDeckAudios(deck)) {
+      if (!hasAudioSource(audio)) {
+        continue;
+      }
+      setAudioCurrentTime(audio, seconds, () =>
+        loadId === undefined || deckLoadIdRef.current[deck] === loadId
+      );
+    }
+  }, [getDeckAudios]);
+
+  const syncDeckToReference = useCallback((deck: AudioDeck) => {
+    const reference = getAudio(deck);
+    if (!reference || !hasAudioSource(reference) || reference.readyState < 1) {
+      return;
+    }
+    for (const audio of getDeckAudios(deck)) {
+      if (
+        audio === reference ||
+        !hasAudioSource(audio) ||
+        audio.readyState < 1 ||
+        Math.abs(audio.currentTime - reference.currentTime) <= SYNC_DRIFT_SECONDS
+      ) {
+        continue;
+      }
+      try {
+        audio.currentTime = reference.currentTime;
+      } catch {
+        // Ignore transient seek failures while a hidden stem is still buffering.
+      }
+    }
+  }, [getAudio, getDeckAudios]);
+
+  const prepareDeckForTrack = useCallback((deck: AudioDeck, track: Track): number => {
+    deckTracksRef.current[deck] = track;
+    deckLoadIdRef.current[deck] += 1;
+    const loadId = deckLoadIdRef.current[deck];
+    const availableStems = new Set<AudioStem>(["original", ...track.available_stems]);
+
+    for (const stem of AUDIO_STEMS) {
+      const audio = getStemAudio(deck, stem);
+      if (!audio) {
+        continue;
+      }
+      audio.pause();
+      if (!availableStems.has(stem)) {
+        clearAudioSource(audio);
+        continue;
+      }
+
+      const nextSrc = new URL(audioUrl(track.id, stem), window.location.href).href;
+      if (audio.src !== nextSrc) {
+        audio.src = nextSrc;
+      }
+    }
+
+    applyDeckVolume(deck);
+    return loadId;
+  }, [applyDeckVolume, getStemAudio]);
+
+  const runWhenReferenceReady = useCallback((
+    deck: AudioDeck,
+    loadId: number,
+    callback: (audio: HTMLAudioElement) => void
+  ) => {
+    const audio = getAudio(deck);
+    if (!audio) {
+      return;
+    }
+    const run = () => {
+      if (deckLoadIdRef.current[deck] === loadId) {
+        callback(audio);
+      }
     };
-    const primary = primaryAudioRef.current;
-    const secondary = secondaryAudioRef.current;
-    primary?.addEventListener("play", syncPlaybackState);
-    primary?.addEventListener("pause", syncPlaybackState);
-    primary?.addEventListener("ended", syncPlaybackState);
-    secondary?.addEventListener("play", syncPlaybackState);
-    secondary?.addEventListener("pause", syncPlaybackState);
-    secondary?.addEventListener("ended", syncPlaybackState);
-    syncPlaybackState();
-    return () => {
-      primary?.removeEventListener("play", syncPlaybackState);
-      primary?.removeEventListener("pause", syncPlaybackState);
-      primary?.removeEventListener("ended", syncPlaybackState);
-      secondary?.removeEventListener("play", syncPlaybackState);
-      secondary?.removeEventListener("pause", syncPlaybackState);
-      secondary?.removeEventListener("ended", syncPlaybackState);
-    };
+    if (audio.readyState >= 1) {
+      run();
+      return;
+    }
+    audio.addEventListener("loadedmetadata", run, { once: true });
   }, [getAudio]);
 
   useEffect(() => {
+    const syncPlaybackState = () => {
+      setPlaybackState(isDeckPlaying(activeDeckRef.current));
+    };
+    const audios = getAllAudios();
+    for (const audio of audios) {
+      audio.addEventListener("play", syncPlaybackState);
+      audio.addEventListener("pause", syncPlaybackState);
+      audio.addEventListener("ended", syncPlaybackState);
+    }
+    syncPlaybackState();
+    return () => {
+      for (const audio of audios) {
+        audio.removeEventListener("play", syncPlaybackState);
+        audio.removeEventListener("pause", syncPlaybackState);
+        audio.removeEventListener("ended", syncPlaybackState);
+      }
+    };
+  }, [getAllAudios, isDeckPlaying, setPlaybackState]);
+
+  useEffect(() => {
     const interval = window.setInterval(() => {
+      for (const deck of AUDIO_DECKS) {
+        syncDeckToReference(deck);
+      }
+
       const audio = getAudio(activeDeckRef.current);
       if (!audio || audio.paused) {
         return;
@@ -149,13 +326,27 @@ export function useAudioPlayback({
       }
     }, 500);
     return () => window.clearInterval(interval);
-  }, [getAudio]);
+  }, [getAudio, syncDeckToReference]);
+
+  useEffect(() => {
+    playbackStemRef.current = playbackStem;
+    applyAllDeckVolumes();
+    const audio = getAudio(activeDeckRef.current);
+    if (audio && hasAudioSource(audio)) {
+      setCurrentTime(audio.currentTime);
+      if (Number.isFinite(audio.duration)) {
+        setCurrentDuration(audio.duration);
+      }
+    }
+    if (isPlayingRef.current) {
+      void playDeck(activeDeckRef.current).then(setPlaybackState);
+    }
+  }, [applyAllDeckVolumes, getAudio, playDeck, playbackStem, setPlaybackState]);
 
   const playTrack = useCallback((track: Track, startSeconds?: number) => {
     cancelFade();
     const deck = activeDeckRef.current;
-    const audio = getAudio(deck);
-    const inactiveAudio = getAudio(getInactiveDeck(deck));
+    const inactiveDeck = getInactiveDeck(deck);
 
     setRoutePreview(null);
     setTrackAutoplayPreview(null);
@@ -170,38 +361,42 @@ export function useAudioPlayback({
       resetAutoplayHistory();
       resetTrackAutoplayHistory(track.id);
     }
-    if (!audio) {
-      return;
-    }
-    pauseAudio(inactiveAudio);
-    audio.volume = 1;
-    audio.src = trackAudioUrl(track);
-    audio.onloadedmetadata = () => {
+
+    pauseDeck(inactiveDeck);
+    deckVolumeRef.current[deck] = 1;
+    deckVolumeRef.current[inactiveDeck] = 0;
+    applyDeckVolume(inactiveDeck);
+    const loadId = prepareDeckForTrack(deck, track);
+
+    runWhenReferenceReady(deck, loadId, (audio) => {
       const defaultStartSeconds = similarityMode === "track" && !trackAutoplay ? 39 : 0;
-      const nextCurrentTime =
-        startSeconds === undefined
-          ? Math.min(defaultStartSeconds, Math.max(0, audio.duration - 1))
-          : Math.min(startSeconds, Math.max(0, audio.duration - 1));
-      audio.currentTime = nextCurrentTime;
+      const requestedStartSeconds = startSeconds ?? defaultStartSeconds;
+      const duration = Number.isFinite(audio.duration) ? audio.duration : requestedStartSeconds;
+      const nextCurrentTime = Math.min(requestedStartSeconds, Math.max(0, duration - 0.01));
+      setDeckCurrentTime(deck, nextCurrentTime, loadId);
       setCurrentTime(nextCurrentTime);
-      setCurrentDuration(audio.duration);
-      void audio
-        .play()
-        .then(() => setIsPlaying(true))
-        .catch(() => setIsPlaying(false));
-    };
+      if (Number.isFinite(audio.duration)) {
+        setCurrentDuration(audio.duration);
+      }
+      void playDeck(deck).then(setPlaybackState);
+    });
   }, [
+    applyDeckVolume,
     cancelFade,
-    getAudio,
+    pauseDeck,
+    playDeck,
+    prepareDeckForTrack,
     resetAutoplayHistory,
     resetTrackAutoplayHistory,
+    runWhenReferenceReady,
+    setDeckCurrentTime,
+    setPlaybackState,
     setRoutePreview,
     setSelected,
     setTrackAutoplayPreview,
     similarityMode,
     trackAutoplay,
     trackAutoplayPreviewKeyRef,
-    trackAudioUrl,
   ]);
 
   const crossfadeToTrack = useCallback((
@@ -212,8 +407,7 @@ export function useAudioPlayback({
     const fromDeck = activeDeckRef.current;
     const toDeck = getInactiveDeck(fromDeck);
     const fromAudio = getAudio(fromDeck);
-    const toAudio = getAudio(toDeck);
-    if (!fromAudio || !toAudio) {
+    if (!fromAudio || !hasAudioSource(fromAudio)) {
       playTrack(track, startSeconds);
       return;
     }
@@ -243,14 +437,23 @@ export function useAudioPlayback({
           prefetchedMatches = null;
         });
     }
-    toAudio.pause();
-    toAudio.volume = 0;
-    toAudio.src = trackAudioUrl(track);
-    toAudio.onloadedmetadata = () => {
-      toAudio.currentTime = Math.min(startSeconds, Math.max(0, toAudio.duration - 1));
-      void toAudio
-        .play()
-        .then(() => {
+
+    deckVolumeRef.current[fromDeck] = 1;
+    deckVolumeRef.current[toDeck] = 0;
+    const loadId = prepareDeckForTrack(toDeck, track);
+
+    runWhenReferenceReady(toDeck, loadId, (toAudio) => {
+      const duration = Number.isFinite(toAudio.duration) ? toAudio.duration : startSeconds;
+      const nextCurrentTime = Math.min(startSeconds, Math.max(0, duration - 0.01));
+      setDeckCurrentTime(toDeck, nextCurrentTime, loadId);
+      void playDeck(toDeck)
+        .then((toDeckPlaying) => {
+          if (!toDeckPlaying) {
+            isCrossfadingRef.current = false;
+            playTrack(track, startSeconds);
+            return;
+          }
+
           const fadeStart = performance.now();
           const commitTransition = () => {
             if (transitionCommitted) {
@@ -270,9 +473,11 @@ export function useAudioPlayback({
               fadeTimeoutRef.current = null;
             }
 
-            fromAudio.pause();
-            fromAudio.volume = 1;
-            toAudio.volume = 1;
+            pauseDeck(fromDeck);
+            deckVolumeRef.current[fromDeck] = 0;
+            deckVolumeRef.current[toDeck] = 1;
+            applyDeckVolume(fromDeck);
+            applyDeckVolume(toDeck);
             isCrossfadingRef.current = false;
             options.onCommit?.();
             setTrackAutoplayPreview(null);
@@ -294,7 +499,9 @@ export function useAudioPlayback({
             }
             setSelected(track);
             setCurrentTime(toAudio.currentTime);
-            setCurrentDuration(toAudio.duration);
+            if (Number.isFinite(toAudio.duration)) {
+              setCurrentDuration(toAudio.duration);
+            }
             activateDeck(toDeck);
           };
           const updateFade = (now: number): boolean => {
@@ -303,8 +510,10 @@ export function useAudioPlayback({
             }
             const progress = Math.min(1, (now - fadeStart) / (CROSSFADE_SECONDS * 1000));
             const eased = progress * progress * (3 - 2 * progress);
-            fromAudio.volume = 1 - eased;
-            toAudio.volume = eased;
+            deckVolumeRef.current[fromDeck] = 1 - eased;
+            deckVolumeRef.current[toDeck] = eased;
+            applyDeckVolume(fromDeck);
+            applyDeckVolume(toDeck);
 
             if (progress >= 1) {
               commitTransition();
@@ -326,66 +535,36 @@ export function useAudioPlayback({
             CROSSFADE_SECONDS * 1000
           );
           fadeFrameRef.current = window.requestAnimationFrame(fade);
-        })
-        .catch(() => {
-          isCrossfadingRef.current = false;
-          playTrack(track, startSeconds);
         });
-    };
+    });
   }, [
     activateDeck,
+    applyDeckVolume,
     buildRoutePreviewFromHistory,
     cancelFade,
     getAudio,
+    pauseDeck,
+    playDeck,
     playTrack,
+    prepareDeckForTrack,
     recordAutoplayVisit,
+    runWhenReferenceReady,
     segmentAutoplay,
+    setDeckCurrentTime,
     setRoutePreview,
     setSelected,
     setTrackAutoplayPreview,
     similarityMode,
     trackAutoplayPreviewKeyRef,
-    trackAudioUrl,
     tracksRef,
   ]);
 
-  useEffect(() => {
-    if (!selected) {
-      return;
-    }
-    const audio = getAudio(activeDeckRef.current);
-    if (!audio || !audio.src) {
-      return;
-    }
-    const nextSrc = new URL(trackAudioUrl(selected), window.location.href).href;
-    if (audio.src === nextSrc) {
-      return;
-    }
-
-    const nextCurrentTime = audio.currentTime;
-    const shouldResume = !audio.paused;
-    const handleLoadedMetadata = () => {
-      const duration = Number.isFinite(audio.duration) ? audio.duration : nextCurrentTime;
-      audio.currentTime = Math.min(nextCurrentTime, Math.max(0, duration - 1));
-      setCurrentTime(audio.currentTime);
-      setCurrentDuration(duration);
-      if (shouldResume) {
-        void audio
-          .play()
-          .then(() => setIsPlaying(true))
-          .catch(() => setIsPlaying(false));
-      }
-    };
-    audio.pause();
-    audio.addEventListener("loadedmetadata", handleLoadedMetadata, { once: true });
-    audio.src = nextSrc;
-  }, [getAudio, playbackStem, selected, trackAudioUrl]);
-
   const handleTimeUpdate = useCallback((
     deck: AudioDeck,
+    stem: AudioStem,
     event: SyntheticEvent<HTMLAudioElement>
   ) => {
-    if (activeDeckRef.current !== deck) {
+    if (activeDeckRef.current !== deck || resolvedStemForDeck(deck) !== stem) {
       return;
     }
     setCurrentTime(event.currentTarget.currentTime);
@@ -395,34 +574,33 @@ export function useAudioPlayback({
     ) {
       setCurrentDuration(event.currentTarget.duration);
     }
-  }, [currentDuration]);
+  }, [currentDuration, resolvedStemForDeck]);
 
   const togglePlayback = useCallback(() => {
-    const audio = getAudio(activeDeckRef.current);
-    if (!audio || !audio.src) {
+    const deck = activeDeckRef.current;
+    const audio = getAudio(deck);
+    if (!audio || !hasAudioSource(audio)) {
       return;
     }
     if (audio.paused) {
-      void audio
-        .play()
-        .then(() => setIsPlaying(true))
-        .catch(() => setIsPlaying(false));
+      void playDeck(deck).then(setPlaybackState);
       return;
     }
-    audio.pause();
-    setIsPlaying(false);
-  }, [getAudio]);
+    pauseDeck(deck);
+    setPlaybackState(false);
+  }, [getAudio, pauseDeck, playDeck, setPlaybackState]);
 
   const seekTo = useCallback((seconds: number) => {
-    const audio = getAudio(activeDeckRef.current);
+    const deck = activeDeckRef.current;
+    const audio = getAudio(deck);
     if (!audio) {
       return;
     }
     const duration = Number.isFinite(audio.duration) ? audio.duration : currentDuration;
     const clamped = Math.min(Math.max(0, seconds), Math.max(0, duration));
-    audio.currentTime = clamped;
+    setDeckCurrentTime(deck, clamped);
     setCurrentTime(clamped);
-  }, [currentDuration, getAudio]);
+  }, [currentDuration, getAudio, setDeckCurrentTime]);
 
   return {
     activeDeck,
@@ -431,8 +609,7 @@ export function useAudioPlayback({
     currentDuration,
     isPlaying,
     setCurrentTime,
-    primaryAudioRef,
-    secondaryAudioRef,
+    audioRefs,
     isCrossfadingRef,
     getAudio,
     pauseAllAudio,
@@ -448,10 +625,37 @@ function getInactiveDeck(deck: AudioDeck): AudioDeck {
   return deck === "primary" ? "secondary" : "primary";
 }
 
-function pauseAudio(audio: HTMLAudioElement | null): void {
-  if (!audio) {
+function hasAudioSource(audio: HTMLAudioElement): boolean {
+  return Boolean(audio.currentSrc || audio.src);
+}
+
+function clearAudioSource(audio: HTMLAudioElement): void {
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+}
+
+function setAudioCurrentTime(
+  audio: HTMLAudioElement,
+  seconds: number,
+  isCurrent: () => boolean
+): void {
+  const apply = () => {
+    if (!isCurrent()) {
+      return;
+    }
+    const duration = Number.isFinite(audio.duration) ? audio.duration : seconds;
+    const target = Math.min(seconds, Math.max(0, duration - 0.01));
+    try {
+      audio.currentTime = target;
+    } catch {
+      // The browser can reject a seek while metadata is still settling.
+    }
+  };
+
+  if (audio.readyState >= 1) {
+    apply();
     return;
   }
-  audio.pause();
-  audio.volume = 1;
+  audio.addEventListener("loadedmetadata", apply, { once: true });
 }

@@ -4,6 +4,7 @@ import importlib.util
 import logging
 from pathlib import Path
 import sys
+import tempfile
 import types
 from typing import Any
 
@@ -15,6 +16,7 @@ VOCALS_STEM = "Vocals"
 INSTRUMENTAL_STEM = "Instrumental"
 ENSEMBLE_ALGORITHM = "avg_fft"
 OUTPUT_FORMAT = "WAV"
+SEPARATOR_SAMPLE_RATE = 44100
 
 
 @dataclass(frozen=True)
@@ -75,25 +77,52 @@ def separate_vocals_and_instrumental(
 ) -> StemSeparationResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     resolved_models = resolve_separator_models(str(model_dir))
+    vocals_path = output_dir / f"{track_id}.vocals.{OUTPUT_FORMAT.lower()}"
+    instrumental_path = output_dir / f"{track_id}.instrumental.{OUTPUT_FORMAT.lower()}"
 
-    vocals_path = _separate_single_stem(
-        input_path,
-        track_id=track_id,
-        output_dir=output_dir,
-        model_dir=model_dir,
-        models=[resolved_models["hyperace_v2_voc"], resolved_models["deux"]],
-        stem_name=VOCALS_STEM,
-        output_name=f"{track_id}.vocals",
-    )
-    instrumental_path = _separate_single_stem(
-        input_path,
-        track_id=track_id,
-        output_dir=output_dir,
-        model_dir=model_dir,
-        models=[resolved_models["hyperace_v2_inst"], resolved_models["deux"]],
-        stem_name=INSTRUMENTAL_STEM,
-        output_name=f"{track_id}.instrumental",
-    )
+    for path in (vocals_path, instrumental_path):
+        if path.exists():
+            path.unlink()
+
+    with tempfile.TemporaryDirectory(prefix=f"{track_id}.stems.", dir=output_dir) as temp_dir:
+        temp_path = Path(temp_dir)
+        hyperace_vocals = _separate_model_stems(
+            input_path,
+            output_dir=temp_path,
+            model_dir=model_dir,
+            model=resolved_models["hyperace_v2_voc"],
+            output_single_stem=VOCALS_STEM,
+            output_names={VOCALS_STEM: "hyperace_vocals"},
+        )[VOCALS_STEM]
+        hyperace_instrumental = _separate_model_stems(
+            input_path,
+            output_dir=temp_path,
+            model_dir=model_dir,
+            model=resolved_models["hyperace_v2_inst"],
+            output_single_stem=INSTRUMENTAL_STEM,
+            output_names={INSTRUMENTAL_STEM: "hyperace_instrumental"},
+        )[INSTRUMENTAL_STEM]
+        deux_stems = _separate_model_stems(
+            input_path,
+            output_dir=temp_path,
+            model_dir=model_dir,
+            model=resolved_models["deux"],
+            output_single_stem=None,
+            output_names={
+                VOCALS_STEM: "deux_vocals",
+                INSTRUMENTAL_STEM: "deux_instrumental",
+            },
+        )
+
+        _ensemble_stem_pair(
+            [hyperace_vocals, deux_stems[VOCALS_STEM]],
+            vocals_path,
+        )
+        _ensemble_stem_pair(
+            [hyperace_instrumental, deux_stems[INSTRUMENTAL_STEM]],
+            instrumental_path,
+        )
+
     return StemSeparationResult(vocals_path=vocals_path, instrumental_path=instrumental_path)
 
 
@@ -413,43 +442,113 @@ def _hyperace_model_args(config: dict[str, Any]) -> dict[str, Any]:
     return args
 
 
-def _separate_single_stem(
+def _separate_model_stems(
     input_path: Path,
     *,
-    track_id: str,
     output_dir: Path,
     model_dir: Path,
-    models: list[ResolvedModel],
-    stem_name: str,
-    output_name: str,
-) -> Path:
-    target_path = output_dir / f"{output_name}.{OUTPUT_FORMAT.lower()}"
-    if target_path.exists():
-        target_path.unlink()
-
+    model: ResolvedModel,
+    output_single_stem: str | None,
+    output_names: dict[str, str],
+) -> dict[str, Path]:
+    configure_torch_cuda_for_separator()
     separator_class = create_hf_separator_class()
     separator = separator_class(
-        resolved_models=models,
+        resolved_models=[model],
         log_level=logging.WARNING,
         model_file_dir=str(model_dir),
         output_dir=str(output_dir),
         output_format=OUTPUT_FORMAT,
-        output_single_stem=stem_name,
-        ensemble_algorithm=ENSEMBLE_ALGORITHM,
-        ensemble_weights=[1.0] * len(models),
+        output_single_stem=output_single_stem,
+        use_autocast=True,
     )
-    separator.load_model([model.model_filename for model in models])
-    output_files = separator.separate(str(input_path), {stem_name: output_name})
+    _ensure_cuda_is_preferred(separator)
+    separator.load_model([model.model_filename])
+    output_files = separator.separate(str(input_path), output_names)
+    return _collect_stem_outputs(output_dir, output_names, output_files)
 
-    if target_path.exists():
-        return target_path
 
-    for output_file in output_files:
-        path = Path(output_file)
-        if path.exists() and path.stem == output_name:
-            return path
+def _collect_stem_outputs(
+    output_dir: Path,
+    output_names: dict[str, str],
+    output_files: list[str],
+) -> dict[str, Path]:
+    outputs: dict[str, Path] = {}
+    output_paths = [Path(output_file) for output_file in output_files]
+    for stem_name, output_name in output_names.items():
+        expected_path = output_dir / f"{output_name}.{OUTPUT_FORMAT.lower()}"
+        if expected_path.exists():
+            outputs[stem_name] = expected_path
+            continue
 
-    raise RuntimeError(f"{stem_name} separation did not create an output file for {track_id}")
+        for path in output_paths:
+            if path.exists() and path.stem == output_name:
+                outputs[stem_name] = path
+                break
+        else:
+            raise RuntimeError(f"{stem_name} separation did not create an output file")
+    return outputs
+
+
+def _ensemble_stem_pair(source_paths: list[Path], target_path: Path) -> None:
+    import librosa
+    import soundfile as sf
+    from audio_separator.separator.ensembler import Ensembler
+
+    waveforms = []
+    for path in source_paths:
+        waveform, _ = librosa.load(path, mono=False, sr=SEPARATOR_SAMPLE_RATE)
+        if waveform.ndim == 1:
+            waveform = waveform[None, :]
+        waveforms.append(waveform)
+
+    ensembler = Ensembler(
+        logging.getLogger(__name__),
+        ENSEMBLE_ALGORITHM,
+        weights=[1.0] * len(waveforms),
+    )
+    ensembled = ensembler.ensemble(waveforms)
+    if ensembled is None:
+        raise RuntimeError(f"No waveforms were available for {target_path.name}")
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(target_path, ensembled.T, SEPARATOR_SAMPLE_RATE)
+
+
+def configure_torch_cuda_for_separator() -> None:
+    import torch
+
+    if not torch.cuda.is_available():
+        return
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
+
+
+def _ensure_cuda_is_preferred(separator) -> None:
+    import torch
+
+    if not torch.cuda.is_available():
+        return
+    separator.torch_device = torch.device("cuda")
+    providers = _onnx_cuda_providers()
+    if providers:
+        separator.onnx_execution_provider = providers
+
+
+def _onnx_cuda_providers() -> list[str]:
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return []
+
+    available = ort.get_available_providers()
+    providers = [
+        provider
+        for provider in ("CUDAExecutionProvider", "CPUExecutionProvider")
+        if provider in available
+    ]
+    return providers
 
 
 def _select_repo_file(files: list[str], path_prefix: str, suffixes: tuple[str, ...]) -> str:

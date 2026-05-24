@@ -5,8 +5,10 @@ from app.separation import (
     ResolvedModel,
     create_hf_separator_class,
     _coerce_roformer_tuple_fields,
+    _ensure_cuda_is_preferred,
     _is_mel_band_roformer_config,
     resolve_model,
+    separate_vocals_and_instrumental,
 )
 
 
@@ -102,3 +104,105 @@ def test_coerces_roformer_tuple_fields() -> None:
 
     assert config["multi_stft_resolutions_window_sizes"] == (4096, 2048)
     assert config["freqs_per_bands"] == (2, 2)
+
+
+def test_ensure_cuda_is_preferred_sets_torch_and_onnx_provider(monkeypatch) -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+        @staticmethod
+        def device(name: str) -> str:
+            return name
+
+    class FakeSeparator:
+        torch_device = None
+        onnx_execution_provider = ["CPUExecutionProvider"]
+
+    separator = FakeSeparator()
+    monkeypatch.setitem(__import__("sys").modules, "torch", FakeTorch)
+    monkeypatch.setattr(
+        "app.separation._onnx_cuda_providers",
+        lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+
+    _ensure_cuda_is_preferred(separator)
+
+    assert separator.torch_device == "cuda"
+    assert separator.onnx_execution_provider == [
+        "CUDAExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+
+
+def test_separate_runs_deux_once_and_ensembles_both_stems(monkeypatch, tmp_path: Path) -> None:
+    resolved = {
+        key: ResolvedModel(
+            model_filename=f"{key}.ckpt",
+            checkpoint_path=tmp_path / f"{key}.ckpt",
+            config_path=tmp_path / f"{key}.yaml",
+            friendly_name=key,
+        )
+        for key in ("hyperace_v2_voc", "hyperace_v2_inst", "deux")
+    }
+    separate_calls = []
+    ensemble_calls = []
+
+    def fake_resolve_separator_models(model_dir: str):
+        return resolved
+
+    def fake_separate_model_stems(
+        input_path: Path,
+        *,
+        output_dir: Path,
+        model_dir: Path,
+        model: ResolvedModel,
+        output_single_stem: str | None,
+        output_names: dict[str, str],
+    ) -> dict[str, Path]:
+        separate_calls.append((model.model_filename, output_single_stem, output_names))
+        outputs = {}
+        for stem, name in output_names.items():
+            path = output_dir / f"{name}.wav"
+            path.write_bytes(b"stem")
+            outputs[stem] = path
+        return outputs
+
+    def fake_ensemble_stem_pair(source_paths: list[Path], target_path: Path) -> None:
+        ensemble_calls.append(([path.name for path in source_paths], target_path.name))
+        target_path.write_bytes(b"ensemble")
+
+    monkeypatch.setattr("app.separation.resolve_separator_models", fake_resolve_separator_models)
+    monkeypatch.setattr("app.separation._separate_model_stems", fake_separate_model_stems)
+    monkeypatch.setattr("app.separation._ensemble_stem_pair", fake_ensemble_stem_pair)
+
+    result = separate_vocals_and_instrumental(
+        tmp_path / "source.wav",
+        track_id="track-1",
+        output_dir=tmp_path / "stems",
+        model_dir=tmp_path / "models",
+    )
+
+    assert [call[0] for call in separate_calls] == [
+        "hyperace_v2_voc.ckpt",
+        "hyperace_v2_inst.ckpt",
+        "deux.ckpt",
+    ]
+    assert separate_calls[2][1] is None
+    assert separate_calls[2][2] == {
+        "Vocals": "deux_vocals",
+        "Instrumental": "deux_instrumental",
+    }
+    assert ensemble_calls == [
+        (["hyperace_vocals.wav", "deux_vocals.wav"], "track-1.vocals.wav"),
+        (
+            ["hyperace_instrumental.wav", "deux_instrumental.wav"],
+            "track-1.instrumental.wav",
+        ),
+    ]
+    assert result.vocals_path.exists()
+    assert result.instrumental_path.exists()

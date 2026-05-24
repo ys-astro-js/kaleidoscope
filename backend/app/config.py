@@ -26,6 +26,10 @@ class Settings(BaseModel):
         return self.data_dir / "models" / "audio-separator"
 
     @property
+    def cover_model_dir(self) -> Path:
+        return self.data_dir / "models" / "discogs-vinet"
+
+    @property
     def sqlite_path(self) -> Path:
         return self.data_dir / "app.sqlite"
 
@@ -44,4 +48,5 @@ def ensure_data_dirs(settings: Settings) -> None:
     settings.art_dir.mkdir(parents=True, exist_ok=True)
     settings.stem_dir.mkdir(parents=True, exist_ok=True)
     settings.separator_model_dir.mkdir(parents=True, exist_ok=True)
+    settings.cover_model_dir.mkdir(parents=True, exist_ok=True)
     settings.lancedb_dir.mkdir(parents=True, exist_ok=True)

@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import database
 from app.context import AppContext, create_app_context
 from app.dependencies import set_app_context
-from app.routers import feedback, media, tracks
+from app.routers import feedback, media, similarity, tracks
 
 context = create_app_context()
 settings = context.settings
@@ -36,11 +36,12 @@ def create_app(app_context: AppContext = context) -> FastAPI:
     app.include_router(tracks.router)
     app.include_router(feedback.router)
     app.include_router(media.router)
+    app.include_router(similarity.router)
     return app
 
 
 def resume_pending_tracks(app_context: AppContext) -> None:
-    asyncio.create_task(asyncio.to_thread(app_context.service.recompute_layout))
+    asyncio.create_task(asyncio.to_thread(app_context.service.backfill_cover_identity_features))
     for row in database.list_tracks(app_context.conn):
         if row["status"] in {"queued", "processing"}:
             asyncio.create_task(asyncio.to_thread(app_context.service.process_track, row["id"]))

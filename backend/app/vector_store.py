@@ -20,6 +20,7 @@ DEFAULT_VOCALS_SEGMENT_WEIGHT = 0.078125
 DEFAULT_INSTRUMENTAL_GLOBAL_WEIGHT = 0.171875
 DEFAULT_INSTRUMENTAL_SEGMENT_WEIGHT = 0.078125
 TOP_SEGMENT_MATCHES = 3
+SEGMENT_COVERAGE_MATCHES = 6
 WEIGHT_FIELDS = (
     "global_semantic",
     "segment_semantic",
@@ -276,6 +277,29 @@ class VectorStore:
             for candidate_id, score, candidate_segment_index in scored[:limit]
         ]
 
+    def segment_coverage_matrix(
+        self,
+        *,
+        embeddings: dict[str, list[EmbeddingRecord]] | None = None,
+    ) -> dict[str, dict[str, float]]:
+        embeddings = embeddings if embeddings is not None else self.all_embeddings()
+        normalized = _normalize_embeddings(embeddings)
+        matrix: dict[str, dict[str, float]] = {track_id: {track_id: 1.0} for track_id in normalized}
+        ids = list(normalized)
+
+        for first_index, first_id in enumerate(ids):
+            for second_id in ids[first_index + 1 :]:
+                score = _segment_coverage_score(
+                    normalized[first_id].segment_semantic,
+                    normalized[second_id].segment_semantic,
+                )
+                if score is None:
+                    continue
+                matrix[first_id][second_id] = score
+                matrix[second_id][first_id] = score
+
+        return matrix
+
     def _connect(self):
         import lancedb
 
@@ -501,6 +525,41 @@ def _top_segment_score(
         reverse=True,
     )
     return _clamp_score(float(np.mean(scores[:top_k])))
+
+
+def _segment_coverage_score(
+    query_arrays: list[np.ndarray],
+    candidate_arrays: list[np.ndarray],
+) -> float | None:
+    if not query_arrays or not candidate_arrays:
+        return None
+
+    target_matches = min(len(query_arrays), len(candidate_arrays), SEGMENT_COVERAGE_MATCHES)
+    coverage_target = min(max(len(query_arrays), len(candidate_arrays)), SEGMENT_COVERAGE_MATCHES)
+    scored_pairs = sorted(
+        (
+            (_cosine_score(query, candidate), query_index, candidate_index)
+            for query_index, query in enumerate(query_arrays)
+            for candidate_index, candidate in enumerate(candidate_arrays)
+        ),
+        reverse=True,
+    )
+    used_queries = set()
+    used_candidates = set()
+    selected_scores: list[float] = []
+    for score, query_index, candidate_index in scored_pairs:
+        if query_index in used_queries or candidate_index in used_candidates:
+            continue
+        selected_scores.append(score)
+        used_queries.add(query_index)
+        used_candidates.add(candidate_index)
+        if len(selected_scores) >= target_matches:
+            break
+
+    if not selected_scores:
+        return None
+    coverage = len(selected_scores) / coverage_target
+    return _clamp_score(float(np.mean(selected_scores)) * coverage)
 
 
 def _optional_cosine_score(

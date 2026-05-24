@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from app import database
+from app.cover_identity import CoverIdentityFeature
+from app.identity import IdentityFeature
 
 JAPANESE_FILENAME = "\u6771\u4eac\u4e8b\u5909 - \u7fa4\u9752\u65e5\u548c.mp3"
 JAPANESE_TITLE = "\u6771\u4eac\u4e8b\u5909 - \u7fa4\u9752\u65e5\u548c"
@@ -102,6 +104,70 @@ def test_feedback_weights_roundtrip(tmp_path: Path) -> None:
     assert row["instrumental_global_weight"] == 0.2
     assert row["instrumental_segment_weight"] == 0.1
     assert row["event_count"] == 12
+
+
+def test_similarity_mix_roundtrip(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+
+    assert database.get_similarity_mix(conn) is None
+
+    database.set_similarity_mix(
+        conn,
+        vocals_weight=0.4,
+        instrumental_weight=0.1,
+        style_weight=0.7,
+        cover_weight=0.3,
+    )
+    row = database.get_similarity_mix(conn)
+
+    assert row is not None
+    assert row["vocals_weight"] == 0.4
+    assert row["instrumental_weight"] == 0.1
+    assert row["style_weight"] == 0.7
+    assert row["cover_weight"] == 0.3
+
+
+def test_track_identity_feature_roundtrip(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    database.insert_track(
+        conn,
+        track_id="track-id",
+        filename="track-id.mp3",
+        title="track-id",
+        audio_path=tmp_path / "track-id.mp3",
+        art_path=tmp_path / "track-id.png",
+    )
+
+    feature = IdentityFeature(chroma=[[1.0, *([0.0] * 11)]], hop_seconds=2.0)
+    database.set_track_identity_feature(conn, "track-id", feature)
+
+    assert database.get_track_identity_feature(conn, "track-id") == feature
+    assert database.list_track_identity_features(conn) == {"track-id": feature}
+
+
+def test_track_cover_identity_feature_roundtrip(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    database.insert_track(
+        conn,
+        track_id="track-id",
+        filename="track-id.mp3",
+        title="track-id",
+        audio_path=tmp_path / "track-id.mp3",
+        art_path=tmp_path / "track-id.png",
+    )
+
+    feature = CoverIdentityFeature(
+        global_embedding=[1.0, 0.0, 0.0],
+        chunk_embeddings=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        chunk_start_seconds=[0.0, 88.0],
+    )
+    database.set_track_cover_identity_feature(conn, "track-id", feature)
+
+    assert database.get_track_cover_identity_feature(conn, "track-id") == feature
+    assert database.list_track_cover_identity_features(conn) == {"track-id": feature}
 
 
 def test_init_db_removes_unexpected_feedback_weight_columns(tmp_path: Path) -> None:

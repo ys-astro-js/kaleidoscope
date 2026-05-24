@@ -1,5 +1,5 @@
 import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
-import { submitFeedback } from "./api";
+import { fetchSimilarityMix, submitFeedback, updateSimilarityMix } from "./api";
 import {
   type RoutePreview,
   type TrackAutoplayPreview,
@@ -16,7 +16,7 @@ import { useAutoplayHistory } from "./hooks/useAutoplayHistory";
 import { useAutoplayRouting } from "./hooks/useAutoplayRouting";
 import { useTrackLibrary } from "./hooks/useTrackLibrary";
 import MusicScene from "./MusicScene";
-import type { AudioStem, FeedbackLabel, SimilarityMode, Track, ViewMode } from "./types";
+import type { AudioStem, FeedbackLabel, SimilarityMix, SimilarityMode, Track, ViewMode } from "./types";
 
 type PlaybackVisit = {
   trackId: string;
@@ -28,6 +28,14 @@ type FeedbackNotice = {
   label: FeedbackLabel;
 };
 
+const DEFAULT_SIMILARITY_MIX: SimilarityMix = {
+  whole: 0.5,
+  vocals: 0.25,
+  instrumental: 0.25,
+  style: 0.65,
+  cover: 0.35,
+};
+
 export default function App() {
   const [selected, setSelected] = useState<Track | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -36,12 +44,15 @@ export default function App() {
   const [playbackStem, setPlaybackStem] = useState<AudioStem>("original");
   const [trackAutoplay, setTrackAutoplay] = useState(false);
   const [segmentAutoplay, setSegmentAutoplay] = useState(false);
+  const [similarityMix, setSimilarityMix] = useState<SimilarityMix>(DEFAULT_SIMILARITY_MIX);
   const [routePreview, setRoutePreview] = useState<RoutePreview | null>(null);
   const [trackAutoplayPreview, setTrackAutoplayPreview] = useState<TrackAutoplayPreview | null>(null);
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackVisit[]>([]);
   const [feedbackNotice, setFeedbackNotice] = useState<FeedbackNotice | null>(null);
   const tracksRef = useRef<Track[]>([]);
   const feedbackNoticeIdRef = useRef(0);
+  const similarityMixSaveTimerRef = useRef<number | null>(null);
+  const similarityMixSaveIdRef = useRef(0);
   const previousSimilarityModeRef = useRef<SimilarityMode>(similarityMode);
 
   const syncSelectedTrack = useCallback((nextTracks: Track[]) => {
@@ -69,6 +80,23 @@ export default function App() {
     tracksRef.current = tracks;
   }, [tracks]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchSimilarityMix()
+      .then((mix) => {
+        if (!cancelled && similarityMixSaveIdRef.current === 0) {
+          setSimilarityMix({ ...DEFAULT_SIMILARITY_MIX, ...mix });
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      if (similarityMixSaveTimerRef.current !== null) {
+        window.clearTimeout(similarityMixSaveTimerRef.current);
+      }
+    };
+  }, []);
+
   const {
     autoplayKeyRef,
     trackAutoplayKeyRef,
@@ -89,8 +117,7 @@ export default function App() {
     currentDuration,
     isPlaying,
     setCurrentTime,
-    primaryAudioRef,
-    secondaryAudioRef,
+    audioRefs,
     isCrossfadingRef,
     getAudio,
     pauseAllAudio,
@@ -222,6 +249,51 @@ export default function App() {
     await loadTracks();
   }, [loadTracks, selected]);
 
+  const saveSimilarityMix = useCallback((nextMix: SimilarityMix) => {
+    setSimilarityMix(nextMix);
+
+    if (similarityMixSaveTimerRef.current !== null) {
+      window.clearTimeout(similarityMixSaveTimerRef.current);
+    }
+    similarityMixSaveIdRef.current += 1;
+    const saveId = similarityMixSaveIdRef.current;
+    similarityMixSaveTimerRef.current = window.setTimeout(() => {
+      updateSimilarityMix({
+        vocals: nextMix.vocals,
+        instrumental: nextMix.instrumental,
+        style: nextMix.style,
+        cover: nextMix.cover,
+      })
+        .then(async (savedMix) => {
+          if (saveId !== similarityMixSaveIdRef.current) {
+            return;
+          }
+          setSimilarityMix(savedMix);
+          await loadTracks();
+        })
+        .catch(() => undefined);
+    }, 160);
+  }, [loadTracks]);
+
+  const changeSimilarityStemShare = useCallback((vocalShare: number) => {
+    const clampedShare = Math.max(0, Math.min(1, vocalShare));
+    saveSimilarityMix({
+      ...similarityMix,
+      whole: 0.5,
+      vocals: 0.5 * clampedShare,
+      instrumental: 0.5 * (1 - clampedShare),
+    });
+  }, [saveSimilarityMix, similarityMix]);
+
+  const changeSimilaritySourceShare = useCallback((styleShare: number) => {
+    const clampedShare = Math.max(0, Math.min(1, styleShare));
+    saveSimilarityMix({
+      ...similarityMix,
+      style: clampedShare,
+      cover: 1 - clampedShare,
+    });
+  }, [saveSimilarityMix, similarityMix]);
+
   const clearFeedbackNotice = useCallback((id: number) => {
     setFeedbackNotice((current) => current?.id === id ? null : current);
   }, []);
@@ -352,7 +424,10 @@ export default function App() {
         activeTracks={activeTracks}
         message={message}
         viewMode={viewMode}
+        similarityMix={similarityMix}
         onViewModeChange={setViewMode}
+        onSimilarityStemShareChange={changeSimilarityStemShare}
+        onSimilaritySourceShareChange={changeSimilaritySourceShare}
         onClearTracks={clearTracks}
         onFilesSelected={selectFiles}
       />
@@ -400,8 +475,7 @@ export default function App() {
       <NowPlaying
         selected={selected}
         activeDeck={activeDeck}
-        primaryAudioRef={primaryAudioRef}
-        secondaryAudioRef={secondaryAudioRef}
+        audioRefs={audioRefs}
         similarityMode={similarityMode}
         isAutoplayActive={similarityMode === "track" ? trackAutoplay : segmentAutoplay}
         isPlaying={isPlaying}

@@ -1,4 +1,4 @@
-import type { AudioStem, FeedbackLabel, SimilarSegment, Track } from "./types";
+import type { AudioStem, FeedbackLabel, SimilarityMix, SimilarSegment, Track } from "./types";
 
 export async function fetchTracks(): Promise<Track[]> {
   const response = await fetch("/api/tracks");
@@ -77,6 +77,30 @@ export async function submitFeedback(
   if (!response.ok) {
     throw new Error("Failed to submit feedback");
   }
+}
+
+export async function fetchSimilarityMix(): Promise<SimilarityMix> {
+  const response = await fetch("/api/similarity/mix");
+  if (!response.ok) {
+    throw new Error("Failed to fetch similarity mix");
+  }
+  return response.json();
+}
+
+export async function updateSimilarityMix(
+  mix: Pick<SimilarityMix, "vocals" | "instrumental" | "style" | "cover">
+): Promise<SimilarityMix> {
+  const response = await fetch("/api/similarity/mix", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(mix)
+  });
+  if (!response.ok) {
+    throw new Error("Failed to update similarity mix");
+  }
+  return response.json();
 }
 
 export function audioUrl(trackId: string, stem: AudioStem = "original"): string {

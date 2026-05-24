@@ -20,12 +20,13 @@ import { artUrl, resolveAudioStem } from "../api";
 import type { AudioStem, FeedbackLabel, SimilarityMode, Track } from "../types";
 
 export type AudioDeck = "primary" | "secondary";
+export type AudioStemRefs = Record<AudioStem, RefObject<HTMLAudioElement | null>>;
+export type AudioDeckRefs = Record<AudioDeck, AudioStemRefs>;
 
 type Props = {
   selected: Track | null;
   activeDeck: AudioDeck;
-  primaryAudioRef: RefObject<HTMLAudioElement | null>;
-  secondaryAudioRef: RefObject<HTMLAudioElement | null>;
+  audioRefs: AudioDeckRefs;
   similarityMode: SimilarityMode;
   isAutoplayActive: boolean;
   isPlaying: boolean;
@@ -43,15 +44,18 @@ type Props = {
   onAutoplayToggle: () => void;
   onSeek: (seconds: number) => void;
   onDelete: (track: Track) => void;
-  onTimeUpdate: (deck: AudioDeck, event: SyntheticEvent<HTMLAudioElement>) => void;
+  onTimeUpdate: (
+    deck: AudioDeck,
+    stem: AudioStem,
+    event: SyntheticEvent<HTMLAudioElement>
+  ) => void;
   onFeedbackNoticeDone: (id: number) => void;
 };
 
 export function NowPlaying({
   selected,
   activeDeck,
-  primaryAudioRef,
-  secondaryAudioRef,
+  audioRefs,
   similarityMode,
   isAutoplayActive,
   isPlaying,
@@ -319,16 +323,17 @@ export function NowPlaying({
         ) : null}
       </div>
 
-      <audio
-        ref={primaryAudioRef}
-        className={activeDeck === "primary" ? "active" : ""}
-        onTimeUpdate={(event) => onTimeUpdate("primary", event)}
-      />
-      <audio
-        ref={secondaryAudioRef}
-        className={activeDeck === "secondary" ? "active" : ""}
-        onTimeUpdate={(event) => onTimeUpdate("secondary", event)}
-      />
+      {(["primary", "secondary"] as const).flatMap((deck) =>
+        stemOptions.map(({ stem }) => (
+          <audio
+            ref={audioRefs[deck][stem]}
+            className={activeDeck === deck && activeStem === stem ? "active" : ""}
+            key={`${deck}-${stem}`}
+            preload="auto"
+            onTimeUpdate={(event) => onTimeUpdate(deck, stem, event)}
+          />
+        ))
+      )}
     </section>
   );
 }

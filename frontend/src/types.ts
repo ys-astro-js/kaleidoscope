@@ -14,6 +14,14 @@ export type SimilarSegment = SimilarTrack & {
   start_seconds: number;
 };
 
+export type SimilarityMix = {
+  whole: number;
+  vocals: number;
+  instrumental: number;
+  style: number;
+  cover: number;
+};
+
 export type Track = {
   id: string;
   filename: string;

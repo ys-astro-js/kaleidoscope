@@ -13,6 +13,21 @@ class FeedbackRequest(BaseModel):
     label: str
 
 
+class SimilarityMix(BaseModel):
+    whole: float = Field(ge=0.0)
+    vocals: float = Field(ge=0.0)
+    instrumental: float = Field(ge=0.0)
+    style: float = Field(ge=0.0)
+    cover: float = Field(ge=0.0)
+
+
+class SimilarityMixRequest(BaseModel):
+    vocals: float = Field(ge=0.0)
+    instrumental: float = Field(ge=0.0)
+    style: float | None = Field(default=None, ge=0.0)
+    cover: float | None = Field(default=None, ge=0.0)
+
+
 class SimilarTrack(BaseModel):
     id: str
     score: float

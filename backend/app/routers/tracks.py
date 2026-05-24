@@ -74,7 +74,7 @@ def similar_segments(
             segment_index=int(item["segment_index"]),
             start_seconds=float(item["start_seconds"]),
         )
-        for item in context.vectors.similar_segments(track_id, segment_index, limit=limit)
+        for item in context.service.similar_segments(track_id, segment_index, limit=limit)
     ]
 
 

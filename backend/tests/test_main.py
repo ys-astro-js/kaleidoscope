@@ -6,6 +6,7 @@ from app import database
 from app import main as app_main
 from app.config import Settings
 from app.context import AppContext
+from app.models import SimilarityMix
 
 
 class FakeService:
@@ -14,8 +15,16 @@ class FakeService:
         self.deleted_track_ids = []
         self.delete_all_calls = 0
         self.delete_result = delete_result
+        self.mix = SimilarityMix(whole=0.5, vocals=0.25, instrumental=0.25, style=0.65, cover=0.35)
+        self.mix_requests = []
 
     def recompute_layout(self) -> None:
+        pass
+
+    def backfill_identity_features(self) -> None:
+        pass
+
+    def backfill_cover_identity_features(self) -> None:
         pass
 
     def record_feedback(self, *, query_track_id: str, candidate_track_id: str, label: str) -> None:
@@ -33,6 +42,52 @@ class FakeService:
 
     def delete_all_tracks(self) -> None:
         self.delete_all_calls += 1
+
+    def similarity_mix(self) -> SimilarityMix:
+        return self.mix
+
+    def set_similarity_mix(
+        self,
+        *,
+        vocals: float,
+        instrumental: float,
+        style: float | None = None,
+        cover: float | None = None,
+    ) -> SimilarityMix:
+        self.mix_requests.append(
+            {"vocals": vocals, "instrumental": instrumental, "style": style, "cover": cover}
+        )
+        total = vocals + instrumental
+        if total <= 0.0:
+            self.mix = SimilarityMix(
+                whole=0.5,
+                vocals=0.25,
+                instrumental=0.25,
+                style=0.65,
+                cover=0.35,
+            )
+        else:
+            style_value = self.mix.style if style is None else style
+            cover_value = self.mix.cover if cover is None else cover
+            style_total = style_value + cover_value
+            self.mix = SimilarityMix(
+                whole=0.5,
+                vocals=0.5 * vocals / total,
+                instrumental=0.5 * instrumental / total,
+                style=style_value / style_total,
+                cover=cover_value / style_total,
+            )
+        return self.mix
+
+    def similar_segments(self, track_id: str, segment_index: int, *, limit: int):
+        return [
+            {
+                "id": "candidate",
+                "score": 0.92,
+                "segment_index": 3,
+                "start_seconds": 45.0,
+            }
+        ][:limit]
 
 
 class FakeVectors:
@@ -125,7 +180,7 @@ def test_similar_segments_returns_segment_matches(tmp_path: Path) -> None:
     conn = database.connect(tmp_path / "app.sqlite")
     database.init_db(conn)
     insert_ready_track(conn, tmp_path, "query")
-    client = make_client(conn, tmp_path, vectors=FakeVectors())
+    client = make_client(conn, tmp_path, service=FakeService())
 
     response = client.get("/api/tracks/query/segments/2/similar")
 
@@ -220,6 +275,48 @@ def test_delete_all_tracks_calls_service_when_confirmed(tmp_path: Path) -> None:
 
     assert response.status_code == 204
     assert service.delete_all_calls == 1
+
+
+def test_get_similarity_mix_returns_current_mix(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    service = FakeService()
+    client = make_client(conn, tmp_path, service=service)
+
+    response = client.get("/api/similarity/mix")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "whole": 0.5,
+        "vocals": 0.25,
+        "instrumental": 0.25,
+        "style": 0.65,
+        "cover": 0.35,
+    }
+
+
+def test_update_similarity_mix_normalizes_stem_split(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    service = FakeService()
+    client = make_client(conn, tmp_path, service=service)
+
+    response = client.put(
+        "/api/similarity/mix",
+        json={"vocals": 3.0, "instrumental": 1.0, "style": 4.0, "cover": 1.0},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "whole": 0.5,
+        "vocals": 0.375,
+        "instrumental": 0.125,
+        "style": 0.8,
+        "cover": 0.2,
+    }
+    assert service.mix_requests == [
+        {"vocals": 3.0, "instrumental": 1.0, "style": 4.0, "cover": 1.0}
+    ]
 
 
 def test_audio_range_response_returns_partial_content(tmp_path: Path) -> None:
