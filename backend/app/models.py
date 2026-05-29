@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 TrackStatus = Literal["queued", "processing", "ready", "error"]
 FeedbackLabel = Literal["similar", "not_similar"]
-AudioStem = Literal["original", "vocals", "instrumental"]
+AudioStem = Literal["original", "instrumental"]
 
 
 class FeedbackRequest(BaseModel):
@@ -22,8 +22,8 @@ class SimilarityMix(BaseModel):
 
 
 class SimilarityMixRequest(BaseModel):
-    vocals: float = Field(ge=0.0)
-    instrumental: float = Field(ge=0.0)
+    whole: float | None = Field(default=None, ge=0.0)
+    instrumental: float | None = Field(default=None, ge=0.0)
     style: float | None = Field(default=None, ge=0.0)
     cover: float | None = Field(default=None, ge=0.0)
 

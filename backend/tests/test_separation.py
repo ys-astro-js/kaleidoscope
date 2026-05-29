@@ -1,27 +1,33 @@
 from pathlib import Path
+import logging
+from types import SimpleNamespace
+
+import numpy as np
+import torch
 
 from app.separation import (
+    INSTRUMENTAL_STEM,
     MODEL_SPECS,
     ResolvedModel,
+    VOCALS_STEM,
     create_hf_separator_class,
     _coerce_roformer_tuple_fields,
     _ensure_cuda_is_preferred,
+    _enable_roformer_gpu_overlap_add,
     _is_mel_band_roformer_config,
     resolve_model,
-    separate_vocals_and_instrumental,
+    separate_instrumental,
 )
 
 
 def test_resolve_model_downloads_checkpoint_and_writes_alias_config(monkeypatch, tmp_path: Path) -> None:
     def fake_list_hf_files(repo_id: str) -> list[str]:
-        assert repo_id == MODEL_SPECS["hyperace_v2_voc"].repo_id
+        assert repo_id == MODEL_SPECS["hyperace_v2_inst"].repo_id
         return [
             "bs_roformer.py",
-            "v2_voc/bs_roformer.py",
-            "v2_voc/config.yaml",
-            "v2_voc/model.ckpt",
             "v2_inst/config.yaml",
             "v2_inst/model.ckpt",
+            "v2_inst/bs_roformer.py",
         ]
 
     def fake_download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
@@ -35,7 +41,7 @@ def test_resolve_model_downloads_checkpoint_and_writes_alias_config(monkeypatch,
                         "  instruments:",
                         "    - vocals",
                         "    - instrument",
-                        "  target_instrument: vocals",
+                        "  target_instrument: instrument",
                     ]
                 ),
                 encoding="utf-8",
@@ -47,17 +53,17 @@ def test_resolve_model_downloads_checkpoint_and_writes_alias_config(monkeypatch,
     monkeypatch.setattr("app.separation.list_hf_files", fake_list_hf_files)
     monkeypatch.setattr("app.separation.download_hf_file", fake_download_hf_file)
 
-    resolved = resolve_model(MODEL_SPECS["hyperace_v2_voc"], tmp_path)
+    resolved = resolve_model(MODEL_SPECS["hyperace_v2_inst"], tmp_path)
 
-    assert resolved.model_filename == "hyperace_v2_voc.ckpt"
+    assert resolved.model_filename == "hyperace_v2_inst.ckpt"
     assert resolved.checkpoint_path.name == "model.ckpt"
     assert resolved.roformer_source_path is not None
     assert resolved.roformer_source_path.name == "bs_roformer.py"
-    assert resolved.roformer_source_path.parent.name == "v2_voc"
+    assert resolved.roformer_source_path.parent.name == "v2_inst"
     alias_config = resolved.config_path.read_text(encoding="utf-8")
     assert "- Vocals" in alias_config
     assert "- Instrumental" in alias_config
-    assert "target_instrument: Vocals" in alias_config
+    assert "target_instrument: Instrumental" in alias_config
     assert "hyperace: true" in alias_config
     assert "hyperace_source_path:" in alias_config
 
@@ -73,19 +79,19 @@ def test_custom_separator_resolves_hf_model_paths(tmp_path: Path) -> None:
     checkpoint_path = tmp_path / "model.ckpt"
     config_path = tmp_path / "config.yaml"
     resolved = ResolvedModel(
-        model_filename="hyperace_v2_voc.ckpt",
+        model_filename="hyperace_v2_inst.ckpt",
         checkpoint_path=checkpoint_path,
         config_path=config_path,
-        friendly_name="HyperACE v2 vocals",
+        friendly_name="HyperACE v2 instrumental",
     )
 
     separator_class = create_hf_separator_class(FakeSeparator)
     separator = separator_class(resolved_models=[resolved], output_dir=str(tmp_path))
 
-    assert separator.download_model_files("hyperace_v2_voc.ckpt") == (
-        "hyperace_v2_voc.ckpt",
+    assert separator.download_model_files("hyperace_v2_inst.ckpt") == (
+        "hyperace_v2_inst.ckpt",
         "MDXC",
-        "HyperACE v2 vocals",
+        "HyperACE v2 instrumental",
         str(checkpoint_path),
         str(config_path),
     )
@@ -139,7 +145,53 @@ def test_ensure_cuda_is_preferred_sets_torch_and_onnx_provider(monkeypatch) -> N
     ]
 
 
-def test_separate_runs_deux_once_and_ensembles_both_stems(monkeypatch, tmp_path: Path) -> None:
+def test_roformer_gpu_overlap_add_preserves_single_stem_output_shape() -> None:
+    from audio_separator.separator.architectures.mdxc_separator import MDXCSeparator
+
+    class EchoModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.tensor(0.0))
+
+        def forward(self, batch):
+            return batch * 0.5
+
+    _enable_roformer_gpu_overlap_add()
+    fake_separator = SimpleNamespace(
+        is_roformer=True,
+        pitch_shift=0,
+        sample_rate=2,
+        override_model_segment_size=False,
+        segment_size=0,
+        model_data_cfgdict=SimpleNamespace(
+            inference=SimpleNamespace(dim_t=3),
+            model=SimpleNamespace(stft_hop_length=2),
+            audio=SimpleNamespace(sample_rate=2, hop_length=2),
+            training=SimpleNamespace(
+                target_instrument=INSTRUMENTAL_STEM,
+                instruments=[INSTRUMENTAL_STEM],
+            ),
+        ),
+        logger=logging.getLogger(__name__),
+        model_run=EchoModel(),
+        overlap=1,
+        is_primary_stem_main_target=False,
+        primary_stem_name=INSTRUMENTAL_STEM,
+        secondary_stem_name=VOCALS_STEM,
+    )
+    fake_separator.overlap_add = MDXCSeparator.overlap_add.__get__(
+        fake_separator,
+        type(fake_separator),
+    )
+    mix = np.arange(16, dtype=np.float32).reshape(2, 8)
+
+    output = MDXCSeparator.demix(fake_separator, mix)
+
+    assert output.shape == mix.shape
+    np.testing.assert_allclose(output, mix * 0.5, rtol=1e-5, atol=1e-5)
+
+
+def test_separate_runs_instrumental_models_only(monkeypatch, tmp_path: Path) -> None:
     resolved = {
         key: ResolvedModel(
             model_filename=f"{key}.ckpt",
@@ -147,7 +199,7 @@ def test_separate_runs_deux_once_and_ensembles_both_stems(monkeypatch, tmp_path:
             config_path=tmp_path / f"{key}.yaml",
             friendly_name=key,
         )
-        for key in ("hyperace_v2_voc", "hyperace_v2_inst", "deux")
+        for key in ("hyperace_v2_inst", "deux")
     }
     separate_calls = []
     ensemble_calls = []
@@ -180,7 +232,7 @@ def test_separate_runs_deux_once_and_ensembles_both_stems(monkeypatch, tmp_path:
     monkeypatch.setattr("app.separation._separate_model_stems", fake_separate_model_stems)
     monkeypatch.setattr("app.separation._ensemble_stem_pair", fake_ensemble_stem_pair)
 
-    result = separate_vocals_and_instrumental(
+    result = separate_instrumental(
         tmp_path / "source.wav",
         track_id="track-1",
         output_dir=tmp_path / "stems",
@@ -188,21 +240,18 @@ def test_separate_runs_deux_once_and_ensembles_both_stems(monkeypatch, tmp_path:
     )
 
     assert [call[0] for call in separate_calls] == [
-        "hyperace_v2_voc.ckpt",
         "hyperace_v2_inst.ckpt",
         "deux.ckpt",
     ]
-    assert separate_calls[2][1] is None
-    assert separate_calls[2][2] == {
+    assert separate_calls[1][1] is None
+    assert separate_calls[1][2] == {
         "Vocals": "deux_vocals",
         "Instrumental": "deux_instrumental",
     }
     assert ensemble_calls == [
-        (["hyperace_vocals.wav", "deux_vocals.wav"], "track-1.vocals.wav"),
         (
             ["hyperace_instrumental.wav", "deux_instrumental.wav"],
             "track-1.instrumental.wav",
         ),
     ]
-    assert result.vocals_path.exists()
     assert result.instrumental_path.exists()

@@ -88,7 +88,7 @@ export async function fetchSimilarityMix(): Promise<SimilarityMix> {
 }
 
 export async function updateSimilarityMix(
-  mix: Pick<SimilarityMix, "vocals" | "instrumental" | "style" | "cover">
+  mix: Partial<Pick<SimilarityMix, "whole" | "instrumental" | "style" | "cover">>
 ): Promise<SimilarityMix> {
   const response = await fetch("/api/similarity/mix", {
     method: "PUT",

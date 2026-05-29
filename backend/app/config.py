@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 class Settings(BaseModel):
     data_dir: Path = Path("data")
-    model_id: str = "OpenMuQ/MuQ-large-msd-iter"
+    model_id: str = "OpenMuQ/MuQ-MuLan-large"
     sample_rate: int = 24_000
 
     @property
@@ -30,6 +30,10 @@ class Settings(BaseModel):
         return self.data_dir / "models" / "discogs-vinet"
 
     @property
+    def cover_alignment_model_dir(self) -> Path:
+        return self.data_dir / "models" / "clews"
+
+    @property
     def sqlite_path(self) -> Path:
         return self.data_dir / "app.sqlite"
 
@@ -49,4 +53,5 @@ def ensure_data_dirs(settings: Settings) -> None:
     settings.stem_dir.mkdir(parents=True, exist_ok=True)
     settings.separator_model_dir.mkdir(parents=True, exist_ok=True)
     settings.cover_model_dir.mkdir(parents=True, exist_ok=True)
+    settings.cover_alignment_model_dir.mkdir(parents=True, exist_ok=True)
     settings.lancedb_dir.mkdir(parents=True, exist_ok=True)

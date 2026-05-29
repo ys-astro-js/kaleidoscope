@@ -14,7 +14,7 @@ def get_similarity_mix(context: AppContextDep) -> SimilarityMix:
 @router.put("/mix", response_model=SimilarityMix)
 def update_similarity_mix(mix: SimilarityMixRequest, context: AppContextDep) -> SimilarityMix:
     return context.service.set_similarity_mix(
-        vocals=mix.vocals,
+        whole=mix.whole,
         instrumental=mix.instrumental,
         style=mix.style,
         cover=mix.cover,

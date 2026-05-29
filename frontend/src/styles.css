@@ -29,6 +29,10 @@ button {
 }
 
 .app {
+  --player-bottom: 20px;
+  --player-height: 72px;
+  --player-gap: 12px;
+  --player-half-width: max(310px, 19vw);
   position: relative;
   width: 100vw;
   height: 100vh;
@@ -371,14 +375,14 @@ button:disabled:hover {
 .feedback-panel {
   position: absolute;
   z-index: 2;
-  left: calc(50% + min(16.6665vw, (100vw - 40px) / 2) + 12px);
+  left: calc(50% + var(--player-half-width) + var(--player-gap));
   right: auto;
-  bottom: 20px;
+  bottom: var(--player-bottom);
   display: flex;
   align-items: center;
   gap: 8px;
   width: max-content;
-  max-width: min(360px, max(220px, calc(50vw - 292px)));
+  max-width: min(360px, calc(50vw - var(--player-half-width) - var(--player-gap) - 20px));
   height: 72px;
   padding: 10px 12px;
   border-radius: 999px;
@@ -613,7 +617,7 @@ button:disabled:hover {
   z-index: 2;
   left: 50%;
   right: auto;
-  bottom: 20px;
+  bottom: var(--player-bottom);
   display: flex;
   align-items: center;
   gap: 18px;
@@ -690,35 +694,155 @@ button:disabled:hover {
   color: #cfcfcf;
 }
 
-.stem-switcher {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  height: 38px;
-  min-height: 38px;
-  padding: 4px;
-  border-radius: 999px;
-  background: #222222;
-}
-
-.stem-switcher button {
+.playback-stem-mix-control {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  min-width: 30px;
-  height: 30px;
-  min-height: 30px;
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
+  min-height: 38px;
+  border-radius: 999px;
+  color: #f3f3f3;
+  background: transparent;
+  cursor: pointer;
+}
+
+.playback-stem-mix-control:hover,
+.playback-stem-mix-control:active {
+  background: transparent;
+}
+
+.playback-stem-mix-control:has(.playback-stem-mix-input:focus-visible) {
+  box-shadow: 0 0 0 2px rgba(238, 238, 238, 0.24);
+}
+
+.playback-stem-mix-control:has(.playback-stem-mix-input:disabled) {
+  cursor: default;
+  color: #777777;
+}
+
+.playback-stem-mix-trigger-icon {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  transition: opacity 150ms ease;
+}
+
+.playback-stem-mix-panel {
+  position: absolute;
+  z-index: 4;
+  bottom: 0;
+  left: 0;
+  width: 38px;
+  height: 132px;
+  border-radius: 999px;
+  background: #222222;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease;
+}
+
+.playback-stem-mix-control:hover .playback-stem-mix-panel,
+.playback-stem-mix-control:has(.playback-stem-mix-input:focus-visible) .playback-stem-mix-panel {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.playback-stem-mix-control:has(.playback-stem-mix-input:disabled):hover .playback-stem-mix-panel,
+.playback-stem-mix-control:has(.playback-stem-mix-input:disabled):has(.playback-stem-mix-input:focus-visible) .playback-stem-mix-panel {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.playback-stem-mix-control:hover .playback-stem-mix-trigger-icon,
+.playback-stem-mix-control:has(.playback-stem-mix-input:focus-visible) .playback-stem-mix-trigger-icon {
+  opacity: 0;
+}
+
+.playback-stem-mix-control:has(.playback-stem-mix-input:disabled):hover .playback-stem-mix-trigger-icon,
+.playback-stem-mix-control:has(.playback-stem-mix-input:disabled):has(.playback-stem-mix-input:focus-visible) .playback-stem-mix-trigger-icon {
+  opacity: 1;
+}
+
+.playback-stem-mix-track {
+  position: absolute;
+  inset: 0;
+  width: 38px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #4a4a4a;
+}
+
+.playback-stem-mix-fill {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  min-height: 2px;
+  border-radius: inherit;
+  background: #eeeeee;
+}
+
+.playback-stem-mix-panel-icon {
+  position: absolute;
+  bottom: 11px;
+  left: 50%;
+  z-index: 1;
+  color: #161616;
+  filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.5));
+  transform: translateX(-50%);
+}
+
+.playback-stem-mix-input {
+  position: absolute;
+  z-index: 5;
+  bottom: 47px;
+  left: 50%;
+  width: 132px;
+  height: 38px;
+  margin: 0;
   padding: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) rotate(-90deg);
+  transform-origin: center;
 }
 
-.stem-switcher button.active {
-  color: #f2f2f2;
-  background: rgba(255, 255, 255, 0.13);
+.playback-stem-mix-control:hover .playback-stem-mix-input,
+.playback-stem-mix-control:has(.playback-stem-mix-input:focus-visible) .playback-stem-mix-input {
+  pointer-events: auto;
 }
 
-.stem-switcher button.active:hover {
-  background: rgba(255, 255, 255, 0.16);
+.playback-stem-mix-input:disabled {
+  cursor: default;
+}
+
+.playback-stem-mix-input::-webkit-slider-runnable-track {
+  height: 38px;
+  background: transparent;
+}
+
+.playback-stem-mix-input::-webkit-slider-thumb {
+  width: 0;
+  height: 38px;
+  appearance: none;
+}
+
+.playback-stem-mix-input::-moz-range-track {
+  height: 38px;
+  background: transparent;
+}
+
+.playback-stem-mix-input::-moz-range-thumb {
+  width: 0;
+  height: 38px;
+  border: 0;
+  background: transparent;
 }
 
 .primary-play-button {
@@ -990,7 +1114,22 @@ button:disabled:hover {
   background: #4a2525;
 }
 
+@media (max-width: 1280px) and (min-width: 721px) {
+  .feedback-panel {
+    left: 50%;
+    right: auto;
+    bottom: calc(var(--player-bottom) + var(--player-height) + var(--player-gap));
+    width: max-content;
+    max-width: calc(100vw - 40px);
+    transform: translateX(-50%);
+  }
+}
+
 @media (max-width: 720px) {
+  .app {
+    --player-bottom: 14px;
+  }
+
   .topbar {
     top: 14px;
     left: 14px;
@@ -1099,17 +1238,40 @@ button:disabled:hover {
     height: 34px;
   }
 
-  .stem-switcher {
+  .playback-stem-mix-control {
+    width: 34px;
+    min-width: 34px;
     height: 34px;
     min-height: 34px;
-    padding: 3px;
   }
 
-  .stem-switcher button {
-    width: 28px;
-    min-width: 28px;
-    height: 28px;
-    min-height: 28px;
+  .playback-stem-mix-panel {
+    width: 34px;
+    height: 124px;
+  }
+
+  .playback-stem-mix-track {
+    width: 34px;
+  }
+
+  .playback-stem-mix-panel-icon {
+    bottom: 9px;
+  }
+
+  .playback-stem-mix-input {
+    bottom: 45px;
+    width: 124px;
+    height: 34px;
+  }
+
+  .playback-stem-mix-input::-webkit-slider-runnable-track,
+  .playback-stem-mix-input::-webkit-slider-thumb {
+    height: 34px;
+  }
+
+  .playback-stem-mix-input::-moz-range-track,
+  .playback-stem-mix-input::-moz-range-thumb {
+    height: 34px;
   }
 
   .player-main {

@@ -5,9 +5,14 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from app import database
-from app.audio import cached_art_thumbnail
+from app.audio import (
+    align_audio_for_playback,
+    cached_art_thumbnail,
+    normalize_audio_for_playback,
+)
 from app.dependencies import AppContextDep
 from app.models import AudioStem
+from app.separation import SEPARATOR_SAMPLE_RATE
 
 router = APIRouter(prefix="/api/tracks", tags=["media"])
 
@@ -35,7 +40,7 @@ def get_audio(
     row = database.get_track(context.conn, track_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Track not found")
-    path = _audio_path(row, stem)
+    path = _audio_path(row, stem, audio_dir=context.settings.audio_dir)
     if range_header is None:
         return FileResponse(path, media_type=_audio_media_type(path))
     return range_response(path, range_header, media_type=_audio_media_type(path))
@@ -72,17 +77,55 @@ def range_response(path: Path, range_header: str, *, media_type: str = "audio/mp
     )
 
 
-def _audio_path(row, stem: AudioStem) -> Path:
+def _audio_path(row, stem: AudioStem, *, audio_dir: Path | None = None) -> Path:
     if stem == "original":
+        path = _playback_original_path(row, audio_dir=audio_dir)
+        if path is not None:
+            return path
         path = Path(row["audio_path"])
-    elif stem == "vocals":
-        path = Path(row["vocals_path"]) if row["vocals_path"] else None
     else:
         path = Path(row["instrumental_path"]) if row["instrumental_path"] else None
+        if path is not None and path.exists():
+            playback_path = _playback_instrumental_path(row, path, audio_dir=audio_dir)
+            if playback_path is not None:
+                return playback_path
 
     if path is None or not path.exists():
         raise HTTPException(status_code=404, detail=f"{stem} audio is not available")
     return path
+
+
+def _playback_original_path(row, *, audio_dir: Path | None) -> Path | None:
+    if audio_dir is None or not row["instrumental_path"]:
+        return None
+    path = audio_dir / f"{row['id']}.playback.wav"
+    if path.exists():
+        return path
+    try:
+        normalize_audio_for_playback(Path(row["audio_path"]), path, SEPARATOR_SAMPLE_RATE)
+    except ValueError:
+        return None
+    return path if path.exists() else None
+
+
+def _playback_instrumental_path(row, instrumental_path: Path, *, audio_dir: Path | None) -> Path | None:
+    if audio_dir is None:
+        return None
+    reference_path = _playback_original_path(row, audio_dir=audio_dir)
+    if reference_path is None:
+        return None
+    path = audio_dir / f"{row['id']}.instrumental.playback.wav"
+    if (
+        path.exists()
+        and path.stat().st_mtime >= instrumental_path.stat().st_mtime
+        and path.stat().st_mtime >= reference_path.stat().st_mtime
+    ):
+        return path
+    try:
+        align_audio_for_playback(reference_path, instrumental_path, path, SEPARATOR_SAMPLE_RATE)
+    except ValueError:
+        return None
+    return path if path.exists() else None
 
 
 def _audio_media_type(path: Path) -> str:

@@ -39,18 +39,10 @@ class ResolvedModel:
 
 @dataclass(frozen=True)
 class StemSeparationResult:
-    vocals_path: Path
     instrumental_path: Path
 
 
 MODEL_SPECS = {
-    "hyperace_v2_voc": ModelSpec(
-        key="hyperace_v2_voc",
-        repo_id=HYPERACE_REPO_ID,
-        path_prefix="v2_voc/",
-        target_stem=VOCALS_STEM,
-        friendly_name="HyperACE v2 vocals",
-    ),
     "hyperace_v2_inst": ModelSpec(
         key="hyperace_v2_inst",
         repo_id=HYPERACE_REPO_ID,
@@ -68,7 +60,7 @@ MODEL_SPECS = {
 }
 
 
-def separate_vocals_and_instrumental(
+def separate_instrumental(
     input_path: Path,
     *,
     track_id: str,
@@ -77,23 +69,13 @@ def separate_vocals_and_instrumental(
 ) -> StemSeparationResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     resolved_models = resolve_separator_models(str(model_dir))
-    vocals_path = output_dir / f"{track_id}.vocals.{OUTPUT_FORMAT.lower()}"
     instrumental_path = output_dir / f"{track_id}.instrumental.{OUTPUT_FORMAT.lower()}"
 
-    for path in (vocals_path, instrumental_path):
-        if path.exists():
-            path.unlink()
+    if instrumental_path.exists():
+        instrumental_path.unlink()
 
     with tempfile.TemporaryDirectory(prefix=f"{track_id}.stems.", dir=output_dir) as temp_dir:
         temp_path = Path(temp_dir)
-        hyperace_vocals = _separate_model_stems(
-            input_path,
-            output_dir=temp_path,
-            model_dir=model_dir,
-            model=resolved_models["hyperace_v2_voc"],
-            output_single_stem=VOCALS_STEM,
-            output_names={VOCALS_STEM: "hyperace_vocals"},
-        )[VOCALS_STEM]
         hyperace_instrumental = _separate_model_stems(
             input_path,
             output_dir=temp_path,
@@ -115,15 +97,11 @@ def separate_vocals_and_instrumental(
         )
 
         _ensemble_stem_pair(
-            [hyperace_vocals, deux_stems[VOCALS_STEM]],
-            vocals_path,
-        )
-        _ensemble_stem_pair(
             [hyperace_instrumental, deux_stems[INSTRUMENTAL_STEM]],
             instrumental_path,
         )
 
-    return StemSeparationResult(vocals_path=vocals_path, instrumental_path=instrumental_path)
+    return StemSeparationResult(instrumental_path=instrumental_path)
 
 
 @lru_cache(maxsize=4)
@@ -247,11 +225,15 @@ def create_hf_separator_class(separator_base=None):
 
 
 def install_hyperace_roformer_loader() -> None:
+    from audio_separator.separator.uvr_lib_v5.roformer import attend
     from audio_separator.separator.roformer import roformer_loader
     from audio_separator.separator.roformer.model_loading_result import (
         ImplementationVersion,
         ModelLoadingResult,
     )
+
+    _enable_modern_cuda_flash_attention(attend)
+    _enable_roformer_gpu_overlap_add()
 
     loader_class = roformer_loader.RoformerLoader
     if getattr(loader_class, "_kaleidoscope_hyperace_loader", False):
@@ -353,6 +335,233 @@ def _coerce_roformer_tuple_fields(config: dict[str, Any]) -> None:
     for key in ("freqs_per_bands", "multi_stft_resolutions_window_sizes"):
         if isinstance(config.get(key), list):
             config[key] = tuple(config[key])
+
+
+def _enable_modern_cuda_flash_attention(attend_module) -> None:
+    attend_class = getattr(attend_module, "Attend", None)
+    flash_config = getattr(attend_module, "FlashAttentionConfig", None)
+    if attend_class is None or flash_config is None:
+        return
+    if getattr(attend_class, "_kaleidoscope_modern_cuda_flash", False):
+        return
+
+    original_init = attend_class.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        flash_enabled = _attend_flash_arg(args, kwargs)
+        if not flash_enabled:
+            return
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return
+            major, _ = torch.cuda.get_device_capability(torch.device("cuda"))
+        except Exception:
+            return
+        if major >= 8:
+            # audio-separator only forced flash SDPA for A100. Ampere/Ada GPUs also
+            # support PyTorch flash SDPA for the fp16 RoFormer attention shapes.
+            self.cuda_config = flash_config(True, False, False)
+
+    attend_class.__init__ = patched_init
+    attend_class._kaleidoscope_modern_cuda_flash = True
+
+
+def _enable_roformer_gpu_overlap_add() -> None:
+    from audio_separator.separator.architectures import mdxc_separator
+
+    separator_class = mdxc_separator.MDXCSeparator
+    if getattr(separator_class, "_kaleidoscope_gpu_overlap_add", False):
+        return
+
+    original_demix = separator_class.demix
+
+    def patched_demix(self, mix):
+        if not getattr(self, "is_roformer", False):
+            return original_demix(self, mix)
+
+        try:
+            return _demix_roformer_with_gpu_overlap_add(self, mix, mdxc_separator)
+        except RuntimeError as exc:
+            if not _is_cuda_out_of_memory(exc):
+                raise
+            self.logger.warning(
+                "RoFormer GPU overlap-add ran out of CUDA memory; retrying with the audio-separator CPU path."
+            )
+            mdxc_separator.torch.cuda.empty_cache()
+            return original_demix(self, mix)
+
+    separator_class.demix = patched_demix
+    separator_class._kaleidoscope_gpu_overlap_add = True
+
+
+def _demix_roformer_with_gpu_overlap_add(self, mix, mdxc_module):
+    orig_mix = mix
+    sample_rate = self.sample_rate
+
+    if self.pitch_shift != 0:
+        self.logger.debug(f"Shifting pitch by -{self.pitch_shift} semitones...")
+        mix, sample_rate = mdxc_module.spec_utils.change_pitch_semitones(
+            mix,
+            self.sample_rate,
+            semitone_shift=-self.pitch_shift,
+        )
+
+    device = next(self.model_run.parameters()).device
+    mix = mdxc_module.torch.as_tensor(mix, dtype=mdxc_module.torch.float32, device=device)
+
+    if self.override_model_segment_size:
+        mdx_segment_size = self.segment_size
+        self.logger.debug(f"Using configured segment size: {mdx_segment_size}")
+    else:
+        mdx_segment_size = self.model_data_cfgdict.inference.dim_t
+        self.logger.debug(f"Using model default segment size: {mdx_segment_size}")
+
+    num_stems = (
+        1
+        if self.model_data_cfgdict.training.target_instrument
+        else len(self.model_data_cfgdict.training.instruments)
+    )
+    self.logger.debug(f"Number of stems: {num_stems}")
+
+    stft_hop_len = getattr(self.model_data_cfgdict.model, "stft_hop_length", None)
+    if stft_hop_len is None:
+        stft_hop_len = self.model_data_cfgdict.audio.hop_length
+        self.logger.debug(
+            f"Model.stft_hop_length missing; falling back to audio.hop_length={stft_hop_len}"
+        )
+
+    chunk_size = int(stft_hop_len) * (int(mdx_segment_size) - 1)
+    self.logger.debug(
+        f"Chunk size: {chunk_size} (using stft_hop_length={stft_hop_len} and dim_t={mdx_segment_size})"
+    )
+
+    desired_step = int(self.overlap * self.model_data_cfgdict.audio.sample_rate)
+    step = chunk_size if desired_step <= 0 else min(desired_step, chunk_size)
+    self.logger.debug(f"Step: {step} (desired={desired_step})")
+
+    window = mdxc_module.torch.as_tensor(
+        mdxc_module.signal.windows.hamming(chunk_size),
+        dtype=mdxc_module.torch.float32,
+        device=device,
+    )
+
+    with mdxc_module.torch.no_grad():
+        req_shape = (len(self.model_data_cfgdict.training.instruments),) + tuple(mix.shape)
+        # Keep RoFormer overlap-add on the model device to avoid per-chunk CUDA/CPU synchronization.
+        result = mdxc_module.torch.zeros(req_shape, dtype=mdxc_module.torch.float32, device=device)
+        counter = mdxc_module.torch.zeros(req_shape, dtype=mdxc_module.torch.float32, device=device)
+
+        for i in mdxc_module.tqdm(range(0, mix.shape[1], step)):
+            part = mix[:, i : i + chunk_size]
+            length = part.shape[-1]
+            if i + chunk_size > mix.shape[1]:
+                part = mix[:, -chunk_size:]
+                length = chunk_size
+            x = self.model_run(part.unsqueeze(0))[0]
+            if i + chunk_size > mix.shape[1]:
+                start_idx = result.shape[-1] - chunk_size
+                result = self.overlap_add(result, x, window, start_idx, length)
+                safe_len = min(length, x.shape[-1], window.shape[0])
+                if safe_len > 0:
+                    counter[..., start_idx : start_idx + safe_len] += window[:safe_len]
+            else:
+                result = self.overlap_add(result, x, window, i, length)
+                safe_len = min(length, x.shape[-1], window.shape[0])
+                if safe_len > 0:
+                    counter[..., i : i + safe_len] += window[:safe_len]
+
+    inferenced_outputs = result / counter.clamp(min=1e-10)
+    return _finalize_demixed_outputs(self, inferenced_outputs, num_stems, sample_rate, orig_mix, mdxc_module)
+
+
+def _finalize_demixed_outputs(
+    self,
+    inferenced_outputs,
+    num_stems: int,
+    sample_rate: int,
+    orig_mix,
+    mdxc_module,
+):
+    if num_stems > 1:
+        self.logger.debug("Number of stems is greater than 1, detaching individual sources and correcting pitch if necessary...")
+
+        sources = {}
+        for key, value in zip(
+            self.model_data_cfgdict.training.instruments,
+            inferenced_outputs.cpu().detach().numpy(),
+        ):
+            self.logger.debug(f"Processing instrument: {key}")
+            if self.pitch_shift != 0:
+                self.logger.debug(f"Applying pitch correction for {key}")
+                sources[key] = self.pitch_fix(value, sample_rate, orig_mix)
+            else:
+                sources[key] = value
+
+        if self.is_primary_stem_main_target and num_stems == 1:
+            self.logger.debug(f"Primary stem: {self.primary_stem_name} is main target, detaching and matching array shapes if necessary...")
+            if sources[self.primary_stem_name].shape[1] != orig_mix.shape[1]:
+                sources[self.primary_stem_name] = mdxc_module.spec_utils.match_array_shapes(
+                    sources[self.primary_stem_name],
+                    orig_mix,
+                )
+            sources[self.secondary_stem_name] = orig_mix - sources[self.primary_stem_name]
+
+        self.logger.debug("Deleting inferenced outputs to free up memory")
+        del inferenced_outputs
+
+        self.logger.debug("Returning separated sources")
+        return sources
+
+    self.logger.debug("Processing single source...")
+
+    sources = {
+        key: value.cpu().detach().numpy()
+        for key, value in zip(
+            [self.model_data_cfgdict.training.target_instrument],
+            inferenced_outputs,
+        )
+    }
+    inferenced_output = sources[self.model_data_cfgdict.training.target_instrument]
+
+    self.logger.debug("Demix process completed for single source.")
+
+    self.logger.debug("Deleting inferenced outputs to free up memory")
+    del inferenced_outputs
+
+    if self.pitch_shift != 0:
+        self.logger.debug("Applying pitch correction for single instrument")
+        primary = self.pitch_fix(inferenced_output, sample_rate, orig_mix)
+    else:
+        primary = inferenced_output
+
+    if self.is_primary_stem_main_target:
+        self.logger.debug("Single-target model detected; computing residual secondary stem from original mix")
+        if primary.shape[1] != orig_mix.shape[1]:
+            primary = mdxc_module.spec_utils.match_array_shapes(primary, orig_mix)
+        secondary = orig_mix - primary
+        return {
+            self.primary_stem_name: primary,
+            self.secondary_stem_name: secondary,
+        }
+
+    self.logger.debug("Returning inferenced output for single instrument")
+    return primary
+
+
+def _is_cuda_out_of_memory(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return "cuda" in message and "out of memory" in message
+
+
+def _attend_flash_arg(args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+    if "flash" in kwargs:
+        return bool(kwargs["flash"])
+    if len(args) >= 2:
+        return bool(args[1])
+    return False
 
 
 def _create_hyperace_model(config: dict[str, Any]):

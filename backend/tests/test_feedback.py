@@ -1,112 +1,23 @@
-from pathlib import Path
-
-from app.feedback import DEFAULT_WEIGHTS, MIN_TRAINING_EVENTS, learn_feedback_weights
-from app.vector_store import (
-    GLOBAL_SEMANTIC_KIND,
-    SEGMENT_SEMANTIC_KIND,
-    EmbeddingRecord,
-    VectorStore,
-    WEIGHT_FIELDS,
-)
+from app.feedback import learn_feedback_reranker
+from app.models import SimilarityMix
+from app.reranker import DEFAULT_RERANKER_COEFFICIENTS, PairEvidence, rerank_score
 
 
-def record(kind: str, vector: list[float], segment_index: int = -1) -> EmbeddingRecord:
-    return EmbeddingRecord(kind=kind, segment_index=segment_index, vector=vector)
+def test_feedback_reranker_learns_from_pair_evidence() -> None:
+    positive = PairEvidence(semantic_global=0.2, cover_alignment_consistency=1.0)
+    negative = PairEvidence(semantic_global=1.0, cover_alignment_consistency=0.0)
 
-
-def test_feedback_learning_uses_single_similar_event(monkeypatch) -> None:
-    store = VectorStore(Path("unused"))
-    monkeypatch.setattr(
-        store,
-        "all_embeddings",
-        lambda: {
-            "query": [
-                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
-                record(SEGMENT_SEMANTIC_KIND, [0.0, 1.0], 0),
-            ],
-            "candidate": [
-                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
-                record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
-            ],
-        },
-    )
-
-    result = learn_feedback_weights(
-        store,
+    result = learn_feedback_reranker(
         [
-            {
-                "query_track_id": "query",
-                "candidate_track_id": "candidate",
-                "label": "similar",
-            }
+            (positive, 1),
+            (negative, 0),
         ],
     )
-
-    assert result.event_count == 1
-    assert MIN_TRAINING_EVENTS == 1
-    assert result.weights.global_semantic > DEFAULT_WEIGHTS.global_semantic
-
-
-def test_feedback_learning_uses_single_not_similar_event(monkeypatch) -> None:
-    store = VectorStore(Path("unused"))
-    monkeypatch.setattr(
-        store,
-        "all_embeddings",
-        lambda: {
-            "query": [
-                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
-                record(SEGMENT_SEMANTIC_KIND, [0.0, 1.0], 0),
-            ],
-            "candidate": [
-                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
-                record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
-            ],
-        },
-    )
-
-    result = learn_feedback_weights(
-        store,
-        [
-            {
-                "query_track_id": "query",
-                "candidate_track_id": "candidate",
-                "label": "not_similar",
-            }
-        ],
-    )
-
-    assert result.event_count == 1
-    assert result.weights.global_semantic < DEFAULT_WEIGHTS.global_semantic
-
-
-def test_feedback_learning_uses_only_global_and_segment_features(monkeypatch) -> None:
-    store = VectorStore(Path("unused"))
-    monkeypatch.setattr(
-        store,
-        "all_embeddings",
-        lambda: {
-            "query": [
-                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
-                record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
-            ],
-            "cover_a": [
-                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
-                record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
-            ],
-            "cover_b": [
-                record(GLOBAL_SEMANTIC_KIND, [1.0, 0.0]),
-                record(SEGMENT_SEMANTIC_KIND, [1.0, 0.0], 0),
-            ],
-        },
-    )
-
-    result = learn_feedback_weights(
-        store,
-        [
-            {"query_track_id": "query", "candidate_track_id": "cover_a", "label": "similar"},
-            {"query_track_id": "query", "candidate_track_id": "cover_b", "label": "similar"},
-        ],
-    )
+    mix = SimilarityMix(whole=1.0, vocals=0.0, instrumental=0.0, style=1.0, cover=1.0)
 
     assert result.event_count == 2
-    assert sum(getattr(result.weights, field_name) for field_name in WEIGHT_FIELDS) == 1.0
+    assert rerank_score(positive, mix, result.coefficients) > rerank_score(
+        negative,
+        mix,
+        DEFAULT_RERANKER_COEFFICIENTS,
+    )

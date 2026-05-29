@@ -3,7 +3,6 @@ import {
   Disc3,
   Mic,
   MoreHorizontal,
-  Music,
   Pause,
   Play,
   Repeat2,
@@ -13,10 +12,9 @@ import {
   ThumbsUp,
   Trash2,
   Waypoints,
-  type LucideIcon,
 } from "lucide-react";
 import { SEGMENT_HOP_SECONDS } from "../autoplay";
-import { artUrl, resolveAudioStem } from "../api";
+import { artUrl } from "../api";
 import type { AudioStem, FeedbackLabel, SimilarityMode, Track } from "../types";
 
 export type AudioDeck = "primary" | "secondary";
@@ -34,10 +32,10 @@ type Props = {
   currentDuration: number;
   canPlayNext: boolean;
   feedbackNotice: { id: number; label: FeedbackLabel } | null;
-  playbackStem: AudioStem;
+  playbackWholeShare: number;
   onTrackModeSelect: () => void;
   onSegmentModeSelect: () => void;
-  onStemChange: (stem: AudioStem) => void;
+  onPlaybackWholeShareChange: (wholeShare: number) => void;
   onPrevious: () => void;
   onPlayPause: () => void;
   onNext: () => void;
@@ -63,10 +61,10 @@ export function NowPlaying({
   currentDuration,
   canPlayNext,
   feedbackNotice,
-  playbackStem,
+  playbackWholeShare,
   onTrackModeSelect,
   onSegmentModeSelect,
-  onStemChange,
+  onPlaybackWholeShareChange,
   onPrevious,
   onPlayPause,
   onNext,
@@ -83,12 +81,13 @@ export function NowPlaying({
   const duration = Number.isFinite(currentDuration) ? currentDuration : 0;
   const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
   const subtitle = selected?.album ?? selected?.artist ?? selected?.filename ?? "";
-  const activeStem = selected ? resolveAudioStem(selected, playbackStem) : "original";
-  const stemOptions: Array<{ stem: AudioStem; label: string; Icon: LucideIcon }> = [
-    { stem: "original", label: "Original", Icon: Disc3 },
-    { stem: "vocals", label: "Vocals", Icon: Mic },
-    { stem: "instrumental", label: "Instrumental", Icon: Music },
-  ];
+  const audioStems: AudioStem[] = ["original", "instrumental"];
+  const hasInstrumentalStem = Boolean(selected?.available_stems.includes("instrumental"));
+  const effectiveWholeShare = hasInstrumentalStem
+    ? Math.min(1, Math.max(0, playbackWholeShare))
+    : 1;
+  const wholeSharePercent = Math.round(effectiveWholeShare * 100);
+  const instrumentalPercent = 100 - wholeSharePercent;
   const segmentPieces = useMemo(() => {
     if (similarityMode !== "segment" || duration <= 0 || !selected) {
       return [];
@@ -165,26 +164,34 @@ export function NowPlaying({
             <Waypoints aria-hidden="true" size={18} strokeWidth={2.3} />
           )}
         </button>
-        <div className="stem-switcher" role="group" aria-label="Audio stem">
-          {stemOptions.map(({ stem, label, Icon }) => {
-            const isAvailable = selected
-              ? selected.available_stems.includes(stem)
-              : stem === "original";
-            return (
-              <button
-                type="button"
-                className={activeStem === stem ? "active" : ""}
-                aria-label={label}
-                title={label}
-                disabled={!selected || !isAvailable}
-                key={stem}
-                onClick={() => onStemChange(stem)}
-              >
-                <Icon aria-hidden="true" size={15} strokeWidth={2.35} />
-              </button>
-            );
-          })}
-        </div>
+        <label
+          className="playback-stem-mix-control"
+          aria-label="Full and background playback mix"
+          title={`Full ${wholeSharePercent}%, background ${instrumentalPercent}%`}
+        >
+          <Mic className="playback-stem-mix-trigger-icon" aria-hidden="true" size={17} strokeWidth={2.1} />
+          <div className="playback-stem-mix-panel" aria-hidden="true">
+            <div className="playback-stem-mix-track">
+              <div className="playback-stem-mix-fill" style={{ height: `${wholeSharePercent}%` }} />
+            </div>
+            <Mic className="playback-stem-mix-panel-icon" aria-hidden="true" size={17} strokeWidth={2.1} />
+          </div>
+          <input
+            className="playback-stem-mix-input"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={wholeSharePercent}
+            disabled={!selected || !hasInstrumentalStem}
+            aria-label="Full and background playback split"
+            aria-orientation="vertical"
+            aria-valuetext={`Full ${wholeSharePercent}%, background ${instrumentalPercent}%`}
+            onChange={(event) => (
+              onPlaybackWholeShareChange(Number(event.currentTarget.value) / 100)
+            )}
+          />
+        </label>
         <button
           type="button"
           className="icon-button"
@@ -324,10 +331,10 @@ export function NowPlaying({
       </div>
 
       {(["primary", "secondary"] as const).flatMap((deck) =>
-        stemOptions.map(({ stem }) => (
+        audioStems.map((stem) => (
           <audio
             ref={audioRefs[deck][stem]}
-            className={activeDeck === deck && activeStem === stem ? "active" : ""}
+            className={activeDeck === deck ? "active" : ""}
             key={`${deck}-${stem}`}
             preload="auto"
             onTimeUpdate={(event) => onTimeUpdate(deck, stem, event)}

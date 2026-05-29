@@ -42,6 +42,7 @@ def create_app(app_context: AppContext = context) -> FastAPI:
 
 def resume_pending_tracks(app_context: AppContext) -> None:
     asyncio.create_task(asyncio.to_thread(app_context.service.backfill_cover_identity_features))
+    asyncio.create_task(asyncio.to_thread(app_context.service.backfill_cover_alignment_features))
     for row in database.list_tracks(app_context.conn):
         if row["status"] in {"queued", "processing"}:
             asyncio.create_task(asyncio.to_thread(app_context.service.process_track, row["id"]))

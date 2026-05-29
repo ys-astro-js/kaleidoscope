@@ -1,7 +1,7 @@
 [project]
 name = "music-embedding-test-backend"
 version = "0.1.0"
-description = "Local MuQ music embedding similarity prototype"
+description = "Local OpenMuQ/MuQ-MuLan music embedding similarity prototype"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "fastapi>=0.115.0",
@@ -22,6 +22,13 @@ dependencies = [
   "audio-separator>=0.35.0",
   "huggingface-hub>=0.30.0",
   "onnxruntime-gpu>=1.22.0",
+  "einops>=0.8.0",
+  "lightning>=2.3.0,<3.0.0",
+  "nnAudio>=0.3.3",
+  "omegaconf>=2.3.0,<3.0.0",
+  "soundfile>=0.12.1",
+  "soxr>=0.5.0",
+  "tqdm>=4.66.0",
 ]
 
 [dependency-groups]

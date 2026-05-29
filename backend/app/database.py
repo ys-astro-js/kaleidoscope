@@ -4,17 +4,18 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.cover_alignment import CoverAlignmentFeature
 from app.cover_identity import CoverIdentityFeature
-from app.identity import IdentityFeature
 from app.models import FeedbackLabel, TrackStatus
 
 FEEDBACK_WEIGHTS_ID = "global"
+FEEDBACK_RERANKER_ID = "global"
 SIMILARITY_MIX_ID = "global"
 DEFAULT_WHOLE_SIMILARITY_WEIGHT = 0.5
-DEFAULT_VOCALS_SIMILARITY_WEIGHT = 0.25
-DEFAULT_INSTRUMENTAL_SIMILARITY_WEIGHT = 0.25
-DEFAULT_STYLE_SIMILARITY_WEIGHT = 0.65
-DEFAULT_COVER_SIMILARITY_WEIGHT = 0.35
+DEFAULT_VOCALS_SIMILARITY_WEIGHT = 0.0
+DEFAULT_INSTRUMENTAL_SIMILARITY_WEIGHT = 0.5
+DEFAULT_STYLE_SIMILARITY_WEIGHT = 0.85
+DEFAULT_COVER_SIMILARITY_WEIGHT = 0.15
 DEFAULT_FEEDBACK_WEIGHT_VALUES = {
     "global_weight": 0.34375,
     "segment_weight": 0.15625,
@@ -93,24 +94,14 @@ def init_db(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             vocals_weight REAL NOT NULL,
             instrumental_weight REAL NOT NULL,
-            style_weight REAL NOT NULL DEFAULT 0.65,
-            cover_weight REAL NOT NULL DEFAULT 0.35,
+            style_weight REAL NOT NULL DEFAULT 0.85,
+            cover_weight REAL NOT NULL DEFAULT 0.15,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
-    _ensure_similarity_mix_column(conn, "style_weight", "REAL NOT NULL DEFAULT 0.65")
-    _ensure_similarity_mix_column(conn, "cover_weight", "REAL NOT NULL DEFAULT 0.35")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS track_identity_features (
-            track_id TEXT PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
-            chroma_json TEXT NOT NULL,
-            hop_seconds REAL NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
+    _ensure_similarity_mix_column(conn, "style_weight", "REAL NOT NULL DEFAULT 0.85")
+    _ensure_similarity_mix_column(conn, "cover_weight", "REAL NOT NULL DEFAULT 0.15")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS track_cover_identity_features (
@@ -118,6 +109,28 @@ def init_db(conn: sqlite3.Connection) -> None:
             global_embedding_json TEXT NOT NULL,
             chunk_embeddings_json TEXT NOT NULL,
             chunk_start_seconds_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS track_cover_alignment_features (
+            track_id TEXT PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+            model_key TEXT NOT NULL,
+            global_embedding_json TEXT NOT NULL,
+            segment_embeddings_json TEXT NOT NULL,
+            segment_start_seconds_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS feedback_reranker (
+            id TEXT PRIMARY KEY,
+            coefficients_json TEXT NOT NULL,
+            event_count INTEGER NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
@@ -347,6 +360,46 @@ def set_feedback_weights(
     conn.commit()
 
 
+def get_feedback_reranker(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT coefficients_json, event_count
+        FROM feedback_reranker
+        WHERE id = ?
+        """,
+        (FEEDBACK_RERANKER_ID,),
+    ).fetchone()
+
+
+def set_feedback_reranker(
+    conn: sqlite3.Connection,
+    *,
+    coefficients: dict[str, float],
+    event_count: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO feedback_reranker (
+            id,
+            coefficients_json,
+            event_count,
+            updated_at
+        )
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+            coefficients_json = excluded.coefficients_json,
+            event_count = excluded.event_count,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            FEEDBACK_RERANKER_ID,
+            json.dumps(coefficients, separators=(",", ":"), sort_keys=True),
+            event_count,
+        ),
+    )
+    conn.commit()
+
+
 def get_similarity_mix(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute(
         """
@@ -393,70 +446,6 @@ def set_similarity_mix(
         ),
     )
     conn.commit()
-
-
-def set_track_identity_feature(
-    conn: sqlite3.Connection,
-    track_id: str,
-    feature: IdentityFeature,
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO track_identity_features (
-            track_id,
-            chroma_json,
-            hop_seconds,
-            updated_at
-        )
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(track_id) DO UPDATE SET
-            chroma_json = excluded.chroma_json,
-            hop_seconds = excluded.hop_seconds,
-            updated_at = CURRENT_TIMESTAMP
-        """,
-        (
-            track_id,
-            json.dumps(feature.chroma, separators=(",", ":")),
-            feature.hop_seconds,
-        ),
-    )
-    conn.commit()
-
-
-def get_track_identity_feature(
-    conn: sqlite3.Connection,
-    track_id: str,
-) -> IdentityFeature | None:
-    row = conn.execute(
-        """
-        SELECT chroma_json, hop_seconds
-        FROM track_identity_features
-        WHERE track_id = ?
-        """,
-        (track_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    return IdentityFeature(
-        chroma=json.loads(row["chroma_json"]),
-        hop_seconds=float(row["hop_seconds"]),
-    )
-
-
-def list_track_identity_features(conn: sqlite3.Connection) -> dict[str, IdentityFeature]:
-    rows = conn.execute(
-        """
-        SELECT track_id, chroma_json, hop_seconds
-        FROM track_identity_features
-        """
-    )
-    return {
-        row["track_id"]: IdentityFeature(
-            chroma=json.loads(row["chroma_json"]),
-            hop_seconds=float(row["hop_seconds"]),
-        )
-        for row in rows
-    }
 
 
 def set_track_cover_identity_feature(
@@ -529,6 +518,91 @@ def list_track_cover_identity_features(
             global_embedding=json.loads(row["global_embedding_json"]),
             chunk_embeddings=json.loads(row["chunk_embeddings_json"]),
             chunk_start_seconds=json.loads(row["chunk_start_seconds_json"]),
+        )
+        for row in rows
+    }
+
+
+def set_track_cover_alignment_feature(
+    conn: sqlite3.Connection,
+    track_id: str,
+    feature: CoverAlignmentFeature,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO track_cover_alignment_features (
+            track_id,
+            model_key,
+            global_embedding_json,
+            segment_embeddings_json,
+            segment_start_seconds_json,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(track_id) DO UPDATE SET
+            model_key = excluded.model_key,
+            global_embedding_json = excluded.global_embedding_json,
+            segment_embeddings_json = excluded.segment_embeddings_json,
+            segment_start_seconds_json = excluded.segment_start_seconds_json,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            track_id,
+            feature.model_key,
+            json.dumps(feature.global_embedding, separators=(",", ":")),
+            json.dumps(feature.segment_embeddings, separators=(",", ":")),
+            json.dumps(feature.segment_start_seconds, separators=(",", ":")),
+        ),
+    )
+    conn.commit()
+
+
+def get_track_cover_alignment_feature(
+    conn: sqlite3.Connection,
+    track_id: str,
+) -> CoverAlignmentFeature | None:
+    row = conn.execute(
+        """
+        SELECT
+            model_key,
+            global_embedding_json,
+            segment_embeddings_json,
+            segment_start_seconds_json
+        FROM track_cover_alignment_features
+        WHERE track_id = ?
+        """,
+        (track_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return CoverAlignmentFeature(
+        model_key=row["model_key"],
+        global_embedding=json.loads(row["global_embedding_json"]),
+        segment_embeddings=json.loads(row["segment_embeddings_json"]),
+        segment_start_seconds=json.loads(row["segment_start_seconds_json"]),
+    )
+
+
+def list_track_cover_alignment_features(
+    conn: sqlite3.Connection,
+) -> dict[str, CoverAlignmentFeature]:
+    rows = conn.execute(
+        """
+        SELECT
+            track_id,
+            model_key,
+            global_embedding_json,
+            segment_embeddings_json,
+            segment_start_seconds_json
+        FROM track_cover_alignment_features
+        """
+    )
+    return {
+        row["track_id"]: CoverAlignmentFeature(
+            model_key=row["model_key"],
+            global_embedding=json.loads(row["global_embedding_json"]),
+            segment_embeddings=json.loads(row["segment_embeddings_json"]),
+            segment_start_seconds=json.loads(row["segment_start_seconds_json"]),
         )
         for row in rows
     }

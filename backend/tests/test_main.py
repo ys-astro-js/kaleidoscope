@@ -15,16 +15,22 @@ class FakeService:
         self.deleted_track_ids = []
         self.delete_all_calls = 0
         self.delete_result = delete_result
-        self.mix = SimilarityMix(whole=0.5, vocals=0.25, instrumental=0.25, style=0.65, cover=0.35)
+        self.mix = SimilarityMix(
+            whole=0.5,
+            vocals=0.0,
+            instrumental=0.5,
+            style=0.85,
+            cover=0.15,
+        )
         self.mix_requests = []
 
     def recompute_layout(self) -> None:
         pass
 
-    def backfill_identity_features(self) -> None:
+    def backfill_cover_identity_features(self) -> None:
         pass
 
-    def backfill_cover_identity_features(self) -> None:
+    def backfill_cover_alignment_features(self) -> None:
         pass
 
     def record_feedback(self, *, query_track_id: str, candidate_track_id: str, label: str) -> None:
@@ -49,34 +55,30 @@ class FakeService:
     def set_similarity_mix(
         self,
         *,
-        vocals: float,
-        instrumental: float,
+        whole: float | None = None,
+        instrumental: float | None = None,
         style: float | None = None,
         cover: float | None = None,
     ) -> SimilarityMix:
-        self.mix_requests.append(
-            {"vocals": vocals, "instrumental": instrumental, "style": style, "cover": cover}
+        self.mix_requests.append({
+            "whole": whole,
+            "instrumental": instrumental,
+            "style": style,
+            "cover": cover,
+        })
+        whole_value = self.mix.whole if whole is None else whole
+        instrumental_value = self.mix.instrumental if instrumental is None else instrumental
+        stem_total = whole_value + instrumental_value
+        style_value = self.mix.style if style is None else style
+        cover_value = self.mix.cover if cover is None else cover
+        style_total = style_value + cover_value
+        self.mix = SimilarityMix(
+            whole=whole_value / stem_total,
+            vocals=0.0,
+            instrumental=instrumental_value / stem_total,
+            style=style_value / style_total,
+            cover=cover_value / style_total,
         )
-        total = vocals + instrumental
-        if total <= 0.0:
-            self.mix = SimilarityMix(
-                whole=0.5,
-                vocals=0.25,
-                instrumental=0.25,
-                style=0.65,
-                cover=0.35,
-            )
-        else:
-            style_value = self.mix.style if style is None else style
-            cover_value = self.mix.cover if cover is None else cover
-            style_total = style_value + cover_value
-            self.mix = SimilarityMix(
-                whole=0.5,
-                vocals=0.5 * vocals / total,
-                instrumental=0.5 * instrumental / total,
-                style=style_value / style_total,
-                cover=cover_value / style_total,
-            )
         return self.mix
 
     def similar_segments(self, track_id: str, segment_index: int, *, limit: int):
@@ -135,18 +137,15 @@ def insert_ready_track(conn, tmp_path: Path, track_id: str, audio_bytes: bytes =
     database.update_track(conn, track_id, status="ready")
 
 
-def add_stems(conn, tmp_path: Path, track_id: str) -> tuple[Path, Path]:
-    vocals_path = tmp_path / f"{track_id}.vocals.wav"
+def add_instrumental(conn, tmp_path: Path, track_id: str) -> Path:
     instrumental_path = tmp_path / f"{track_id}.instrumental.wav"
-    vocals_path.write_bytes(b"vocals")
     instrumental_path.write_bytes(b"instrumental")
     database.update_track(
         conn,
         track_id,
-        vocals_path=vocals_path,
         instrumental_path=instrumental_path,
     )
-    return vocals_path, instrumental_path
+    return instrumental_path
 
 
 def test_submit_feedback_records_valid_event(tmp_path: Path) -> None:
@@ -288,11 +287,35 @@ def test_get_similarity_mix_returns_current_mix(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "whole": 0.5,
-        "vocals": 0.25,
-        "instrumental": 0.25,
-        "style": 0.65,
-        "cover": 0.35,
+        "vocals": 0.0,
+        "instrumental": 0.5,
+        "style": 0.85,
+        "cover": 0.15,
     }
+
+
+def test_update_similarity_mix_normalizes_style_split(tmp_path: Path) -> None:
+    conn = database.connect(tmp_path / "app.sqlite")
+    database.init_db(conn)
+    service = FakeService()
+    client = make_client(conn, tmp_path, service=service)
+
+    response = client.put(
+        "/api/similarity/mix",
+        json={"style": 4.0, "cover": 1.0},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "whole": 0.5,
+        "vocals": 0.0,
+        "instrumental": 0.5,
+        "style": 0.8,
+        "cover": 0.2,
+    }
+    assert service.mix_requests == [
+        {"whole": None, "instrumental": None, "style": 4.0, "cover": 1.0}
+    ]
 
 
 def test_update_similarity_mix_normalizes_stem_split(tmp_path: Path) -> None:
@@ -303,19 +326,19 @@ def test_update_similarity_mix_normalizes_stem_split(tmp_path: Path) -> None:
 
     response = client.put(
         "/api/similarity/mix",
-        json={"vocals": 3.0, "instrumental": 1.0, "style": 4.0, "cover": 1.0},
+        json={"whole": 1.0, "instrumental": 3.0},
     )
 
     assert response.status_code == 200
     assert response.json() == {
-        "whole": 0.5,
-        "vocals": 0.375,
-        "instrumental": 0.125,
-        "style": 0.8,
-        "cover": 0.2,
+        "whole": 0.25,
+        "vocals": 0.0,
+        "instrumental": 0.75,
+        "style": 0.85,
+        "cover": 0.15,
     }
     assert service.mix_requests == [
-        {"vocals": 3.0, "instrumental": 1.0, "style": 4.0, "cover": 1.0}
+        {"whole": 1.0, "instrumental": 3.0, "style": None, "cover": None}
     ]
 
 
@@ -336,13 +359,13 @@ def test_audio_endpoint_serves_requested_stem(tmp_path: Path) -> None:
     conn = database.connect(tmp_path / "app.sqlite")
     database.init_db(conn)
     insert_ready_track(conn, tmp_path, "query", audio_bytes=b"audio")
-    add_stems(conn, tmp_path, "query")
+    add_instrumental(conn, tmp_path, "query")
     client = make_client(conn, tmp_path)
 
-    response = client.get("/api/tracks/query/audio?stem=vocals")
+    response = client.get("/api/tracks/query/audio?stem=instrumental")
 
     assert response.status_code == 200
-    assert response.content == b"vocals"
+    assert response.content == b"instrumental"
 
 
 def test_audio_endpoint_returns_404_for_missing_stem(tmp_path: Path) -> None:
@@ -351,6 +374,6 @@ def test_audio_endpoint_returns_404_for_missing_stem(tmp_path: Path) -> None:
     insert_ready_track(conn, tmp_path, "query", audio_bytes=b"audio")
     client = make_client(conn, tmp_path)
 
-    response = client.get("/api/tracks/query/audio?stem=vocals")
+    response = client.get("/api/tracks/query/audio?stem=instrumental")
 
     assert response.status_code == 404

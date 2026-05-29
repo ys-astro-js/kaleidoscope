@@ -5,6 +5,7 @@ import numpy as np
 
 DEFAULT_SEGMENT_SECONDS = 30.0
 DEFAULT_HOP_SECONDS = 15.0
+EMBED_BATCH_SIZE = 8
 MIN_ACTIVE_RMS_RATIO = 0.05
 MIN_SEGMENT_ERROR = "Audio does not contain a usable 30 second segment"
 
@@ -97,12 +98,19 @@ class MuQEmbedder:
             model, device = self._load()
             segment_vectors = []
             with torch.inference_mode():
-                for segment in segments:
-                    wavs = torch.from_numpy(segment).to(dtype=torch.float32, device=device).unsqueeze(0)
-                    output = model(wavs, output_hidden_states=False)
-                    pooled = output.last_hidden_state.mean(dim=1).squeeze(0).detach().cpu().numpy()
-                    segment_vectors.append(pooled)
-                    del output, pooled, wavs
+                for start in range(0, len(segments), EMBED_BATCH_SIZE):
+                    batch = np.stack(segments[start : start + EMBED_BATCH_SIZE])
+                    wavs = torch.from_numpy(batch).to(dtype=torch.float32, device=device)
+                    if self._uses_mulan_model():
+                        output = model(wavs=wavs)
+                    else:
+                        output = model(wavs, output_hidden_states=False)
+                    pooled = _audio_embeddings_from_output(output)
+                    segment_vectors.extend(
+                        np.asarray(vector, dtype=np.float32)
+                        for vector in pooled
+                    )
+                    del batch, output, pooled, wavs
             segment_embeddings = [normalize_vector(vector).tolist() for vector in segment_vectors]
             global_embedding = aggregate_segment_vectors(segment_vectors).tolist()
             return TrackEmbeddings(
@@ -119,11 +127,32 @@ class MuQEmbedder:
             return self._model, self._device
 
         import torch
-        from muq import MuQ
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._model = MuQ.from_pretrained(self.model_id).to(self._device).eval()
+        if self._uses_mulan_model():
+            from muq import MuQMuLan
+
+            self._model = MuQMuLan.from_pretrained(self.model_id).to(self._device).eval()
+        else:
+            from muq import MuQ
+
+            self._model = MuQ.from_pretrained(self.model_id).to(self._device).eval()
         return self._model, self._device
+
+    def _uses_mulan_model(self) -> bool:
+        return "mulan" in self.model_id.lower()
+
+
+def _audio_embeddings_from_output(output) -> np.ndarray:
+    if hasattr(output, "last_hidden_state"):
+        tensor = output.last_hidden_state.mean(dim=1)
+    else:
+        tensor = output[0] if isinstance(output, (tuple, list)) else output
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0)
+        elif tensor.ndim > 2:
+            tensor = tensor.mean(dim=1)
+    return tensor.detach().cpu().numpy()
 
 
 @lru_cache

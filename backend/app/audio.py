@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+import tempfile
 from uuid import uuid4
 
 from fastapi import UploadFile
@@ -56,6 +57,69 @@ def normalize_audio_for_model(input_path: Path, target_path: Path, sample_rate: 
     return target_path
 
 
+def normalize_audio_for_playback(input_path: Path, target_path: Path, sample_rate: int) -> Path:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    command = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(input_path),
+        "-ac",
+        "2",
+        "-ar",
+        str(sample_rate),
+        "-f",
+        "wav",
+        str(target_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "ffmpeg could not decode the uploaded audio"
+        raise ValueError(f"Audio playback normalization failed: {detail}")
+    return target_path
+
+
+def align_audio_for_playback(
+    reference_path: Path,
+    input_path: Path,
+    target_path: Path,
+    sample_rate: int,
+) -> Path:
+    import librosa
+    import numpy as np
+    import soundfile as sf
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    reference, _ = librosa.load(reference_path, sr=sample_rate, mono=True)
+    candidate, _ = librosa.load(input_path, sr=sample_rate, mono=True)
+    if len(reference) == 0 or len(candidate) == 0:
+        raise ValueError("Audio playback alignment failed: empty audio")
+
+    offset_samples = _estimate_alignment_offset(reference, candidate, sample_rate)
+    waveform, _ = librosa.load(input_path, sr=sample_rate, mono=False)
+    if waveform.ndim == 1:
+        waveform = waveform[np.newaxis, :]
+    adjusted = _shift_audio_channels(waveform, offset_samples, len(reference))
+
+    with tempfile.NamedTemporaryFile(
+        suffix=target_path.suffix,
+        dir=target_path.parent,
+        delete=False,
+    ) as temp_file:
+        temp_path = Path(temp_file.name)
+    try:
+        sf.write(temp_path, adjusted.T, sample_rate)
+        temp_path.replace(target_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+    return target_path
+
+
 def extract_metadata(audio_path: Path) -> tuple[str | None, str | None, bytes | None]:
     audio = MutagenFile(audio_path)
     if audio is None or audio.tags is None:
@@ -75,6 +139,83 @@ def extract_metadata(audio_path: Path) -> tuple[str | None, str | None, bytes | 
             art = _extract_art_bytes(value)
 
     return artist, album, art
+
+
+def _estimate_alignment_offset(reference, candidate, sample_rate: int) -> int:
+    import librosa
+    import numpy as np
+
+    hop_length = 512
+    analysis_samples = min(len(reference), len(candidate), sample_rate * 90)
+    reference_envelope = _normalized_envelope(
+        librosa.feature.rms(
+            y=reference[:analysis_samples],
+            frame_length=2048,
+            hop_length=hop_length,
+        )[0]
+    )
+    candidate_envelope = _normalized_envelope(
+        librosa.feature.rms(
+            y=candidate[:analysis_samples],
+            frame_length=2048,
+            hop_length=hop_length,
+        )[0]
+    )
+    if len(reference_envelope) < 4 or len(candidate_envelope) < 4:
+        return 0
+
+    max_lag = min(
+        int(2.0 * sample_rate / hop_length),
+        len(reference_envelope) - 1,
+        len(candidate_envelope) - 1,
+    )
+    best_lag = 0
+    best_score = -1.0
+    for lag in range(-max_lag, max_lag + 1):
+        if lag >= 0:
+            ref = reference_envelope[: len(reference_envelope) - lag]
+            cand = candidate_envelope[lag : lag + len(ref)]
+        else:
+            cand = candidate_envelope[: len(candidate_envelope) + lag]
+            ref = reference_envelope[-lag : -lag + len(cand)]
+        if len(ref) < 8 or len(cand) < 8:
+            continue
+        denominator = float(np.linalg.norm(ref) * np.linalg.norm(cand))
+        if denominator <= 1e-8:
+            continue
+        score = float(np.dot(ref, cand) / denominator)
+        if score > best_score:
+            best_score = score
+            best_lag = lag
+
+    if best_score < 0.15:
+        return 0
+    return best_lag * hop_length
+
+
+def _normalized_envelope(envelope):
+    import numpy as np
+
+    centered = envelope.astype(np.float32) - float(np.mean(envelope))
+    norm = float(np.linalg.norm(centered))
+    if norm <= 1e-8:
+        return centered
+    return centered / norm
+
+
+def _shift_audio_channels(waveform, offset_samples: int, target_samples: int):
+    import numpy as np
+
+    if offset_samples > 0:
+        shifted = waveform[:, offset_samples:]
+    elif offset_samples < 0:
+        shifted = np.pad(waveform, ((0, 0), (-offset_samples, 0)))
+    else:
+        shifted = waveform
+
+    if shifted.shape[1] < target_samples:
+        shifted = np.pad(shifted, ((0, 0), (0, target_samples - shifted.shape[1])))
+    return shifted[:, :target_samples]
 
 
 def write_art_or_placeholder(track_id: str, art_bytes: bytes | None, art_dir: Path) -> Path:

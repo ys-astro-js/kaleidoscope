@@ -20,8 +20,6 @@ DISCOGS_VINET_BINS_PER_OCTAVE = 12
 DISCOGS_VINET_CONTEXT_LENGTH = 7_600
 DISCOGS_VINET_DOWNSAMPLE_FACTOR = 20
 DISCOGS_VINET_CHUNK_OVERLAP = 0.5
-COVER_IDENTITY_SCORE_WEIGHT = 0.35
-COVER_SEGMENT_SCORE_WEIGHT = 0.35
 
 
 @dataclass(frozen=True)
@@ -29,6 +27,13 @@ class CoverIdentityFeature:
     global_embedding: list[float]
     chunk_embeddings: list[list[float]]
     chunk_start_seconds: list[float]
+
+
+@dataclass(frozen=True)
+class CoverIdentityScores:
+    global_score: float | None = None
+    best_segment_score: float | None = None
+    alignment_consistency: float | None = None
 
 
 def extract_cover_identity_feature(
@@ -47,33 +52,18 @@ def _cached_discogs_vinet_embedder(model_dir: str) -> "DiscogsVINetEmbedder":
     return DiscogsVINetEmbedder(Path(model_dir))
 
 
-def cover_identity_similarity(
+def cover_identity_scores(
     query: CoverIdentityFeature,
     candidate: CoverIdentityFeature,
-) -> float | None:
-    global_score = _cosine_score(query.global_embedding, candidate.global_embedding)
-    chunk_score = _top_chunk_score(query.chunk_embeddings, candidate.chunk_embeddings)
-    if global_score is None:
-        return chunk_score
-    if chunk_score is None:
-        return global_score
-    return _clamp_score(global_score * 0.65 + chunk_score * 0.35)
-
-
-def combine_cover_similarity_scores(
-    style_score: float | None,
-    cover_score: float | None,
-    *,
-    cover_weight: float = COVER_IDENTITY_SCORE_WEIGHT,
-) -> float | None:
-    weight = max(0.0, min(1.0, cover_weight))
-    if weight == 0.0:
-        return style_score
-    if style_score is None:
-        return cover_score
-    if cover_score is None:
-        return style_score
-    return _clamp_score(style_score * (1.0 - weight) + cover_score * weight)
+) -> CoverIdentityScores:
+    return CoverIdentityScores(
+        global_score=_cosine_score(query.global_embedding, candidate.global_embedding),
+        best_segment_score=_top_chunk_score(query.chunk_embeddings, candidate.chunk_embeddings),
+        alignment_consistency=_chunk_consistency_score(
+            query.chunk_embeddings,
+            candidate.chunk_embeddings,
+        ),
+    )
 
 
 class DiscogsVINetEmbedder:
@@ -375,6 +365,40 @@ def _top_chunk_score(
     if not scores:
         return None
     return max(scores)
+
+
+def _chunk_consistency_score(
+    query_embeddings: list[list[float]],
+    candidate_embeddings: list[list[float]],
+) -> float | None:
+    if not query_embeddings or not candidate_embeddings:
+        return None
+    target_matches = min(len(query_embeddings), len(candidate_embeddings), 6)
+    coverage_target = min(max(len(query_embeddings), len(candidate_embeddings)), 6)
+    scored_pairs = sorted(
+        (
+            (score, query_index, candidate_index)
+            for query_index, query in enumerate(query_embeddings)
+            for candidate_index, candidate in enumerate(candidate_embeddings)
+            if (score := _cosine_score(query, candidate)) is not None
+        ),
+        reverse=True,
+    )
+    used_queries = set()
+    used_candidates = set()
+    selected_scores: list[float] = []
+    for score, query_index, candidate_index in scored_pairs:
+        if query_index in used_queries or candidate_index in used_candidates:
+            continue
+        selected_scores.append(score)
+        used_queries.add(query_index)
+        used_candidates.add(candidate_index)
+        if len(selected_scores) >= target_matches:
+            break
+    if not selected_scores:
+        return None
+    coverage = len(selected_scores) / coverage_target
+    return _clamp_score(float(np.mean(selected_scores)) * coverage)
 
 
 def _cosine_score(query: list[float], candidate: list[float]) -> float | None:

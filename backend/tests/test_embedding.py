@@ -106,13 +106,19 @@ def test_embed_file_returns_segment_and_average_embeddings(monkeypatch) -> None:
     import librosa
     import torch
 
+    calls = []
+
     class FakeModel:
         def __call__(self, wavs, output_hidden_states):
-            mean = wavs.mean()
+            calls.append(wavs.shape)
+            means = wavs.mean(dim=1)
+            hidden_state = torch.zeros((wavs.shape[0], 2, 2), dtype=torch.float32)
+            hidden_state[:, 0, 0] = means
+            hidden_state[:, 1, 1] = means
             return type(
                 "Output",
                 (),
-                {"last_hidden_state": torch.tensor([[[float(mean), 0.0], [0.0, float(mean)]]])},
+                {"last_hidden_state": hidden_state},
             )()
 
     embedder = MuQEmbedder("unused", sample_rate=1)
@@ -121,8 +127,31 @@ def test_embed_file_returns_segment_and_average_embeddings(monkeypatch) -> None:
 
     embeddings = embedder.embed_file("long.wav")
 
+    assert calls == [torch.Size([3, 30])]
     assert len(embeddings.segment_semantic) == 3
     assert len(embeddings.global_semantic) == 2
     assert embeddings.segments == embeddings.segment_semantic
     assert embeddings.average == embeddings.global_semantic
     assert np.allclose(embeddings.global_semantic, normalize_vector(np.asarray([0.5, 0.5])))
+
+
+def test_embed_file_uses_mulan_audio_path_for_mulan_model(monkeypatch) -> None:
+    import librosa
+    import torch
+
+    calls = []
+
+    class FakeMulan:
+        def __call__(self, *, wavs):
+            calls.append(wavs.shape)
+            return torch.tensor([[2.0, 0.0]])
+
+    embedder = MuQEmbedder("OpenMuQ/MuQ-MuLan-large", sample_rate=1)
+    monkeypatch.setattr(librosa, "load", lambda path, sr, mono: (np.arange(30, dtype=np.float32), sr))
+    monkeypatch.setattr(embedder, "_load", lambda: (FakeMulan(), "cpu"))
+
+    embeddings = embedder.embed_file("long.wav")
+
+    assert calls == [torch.Size([1, 30])]
+    assert embeddings.segment_semantic == [[1.0, 0.0]]
+    assert embeddings.global_semantic == [1.0, 0.0]

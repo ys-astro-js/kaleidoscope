@@ -2,7 +2,7 @@ export type TrackStatus = "queued" | "processing" | "ready" | "error";
 export type FeedbackLabel = "similar" | "not_similar";
 export type ViewMode = "2d" | "3d";
 export type SimilarityMode = "track" | "segment";
-export type AudioStem = "original" | "vocals" | "instrumental";
+export type AudioStem = "original" | "instrumental";
 
 export type SimilarTrack = {
   id: string;

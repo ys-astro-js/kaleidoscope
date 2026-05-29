@@ -3,8 +3,11 @@ from pathlib import Path
 
 import numpy as np
 
+from app.reranker import PairEvidence
+
 SEGMENT_HOP_SECONDS = 15.0
 TABLE_NAME = "track_embeddings"
+TABLE_PREFIX = f"{TABLE_NAME}_dim_"
 GLOBAL_SEMANTIC_KIND = "global_semantic"
 SEGMENT_SEMANTIC_KIND = "segment_semantic"
 VOCALS_GLOBAL_SEMANTIC_KIND = "vocals_global_semantic"
@@ -112,27 +115,29 @@ class VectorStore:
             )
 
         self.delete(track_id)
-        self._add_rows(TABLE_NAME, semantic_rows)
+        for dimension, rows in _rows_by_vector_dimension(semantic_rows).items():
+            self._add_rows(_dimension_table_name(dimension), rows)
 
     def delete(self, track_id: str) -> None:
-        table = self._open_table(TABLE_NAME)
-        if table is None:
-            return
-        try:
-            table.delete(f"track_id = '{track_id}'")
-        except Exception:
-            return
+        for table_name in self._embedding_table_names():
+            table = self._open_table(table_name)
+            if table is None:
+                continue
+            try:
+                table.delete(f"track_id = '{track_id}'")
+            except Exception:
+                continue
 
     def all_vectors(self) -> dict[str, list[float]]:
         return {
             row["track_id"]: row["vector"]
-            for row in self._table_rows(TABLE_NAME)
+            for row in self._embedding_table_rows()
             if _canonical_kind(row.get("kind")) == GLOBAL_SEMANTIC_KIND
         }
 
     def all_embeddings(self) -> dict[str, list[EmbeddingRecord]]:
         embeddings: dict[str, list[EmbeddingRecord]] = {}
-        for row in self._table_rows(TABLE_NAME):
+        for row in self._embedding_table_rows():
             embeddings.setdefault(row["track_id"], []).append(
                 EmbeddingRecord(
                     kind=_canonical_kind(row["kind"]),
@@ -159,41 +164,6 @@ class VectorStore:
             for track_id, records in embeddings.items()
         }
 
-    def similar(
-        self,
-        track_id: str,
-        *,
-        limit: int = 3,
-        embeddings: dict[str, list[EmbeddingRecord]] | None = None,
-        weights: SimilarityWeights | None = None,
-    ) -> list[dict[str, float | str]]:
-        embeddings = embeddings if embeddings is not None else self.all_embeddings()
-        normalized = _normalize_embeddings(embeddings)
-        return _similar_from_normalized(
-            normalized,
-            track_id,
-            limit=limit,
-            weights=weights or SimilarityWeights(),
-        )
-
-    def similar_by_track(
-        self,
-        *,
-        limit: int = 3,
-        weights: SimilarityWeights | None = None,
-    ) -> dict[str, list[dict[str, float | str]]]:
-        normalized = _normalize_embeddings(self.all_embeddings())
-        resolved_weights = weights or SimilarityWeights()
-        return {
-            track_id: _similar_from_normalized(
-                normalized,
-                track_id,
-                limit=limit,
-                weights=resolved_weights,
-            )
-            for track_id in normalized
-        }
-
     def similarity_matrix(
         self,
         *,
@@ -201,7 +171,7 @@ class VectorStore:
         weights: SimilarityWeights | None = None,
     ) -> dict[str, dict[str, float]]:
         embeddings = embeddings if embeddings is not None else self.all_embeddings()
-        normalized = _normalize_embeddings(embeddings)
+        normalized = self.normalized_embeddings(embeddings)
         resolved_weights = weights or SimilarityWeights()
         matrix: dict[str, dict[str, float]] = {
             track_id: {track_id: 1.0}
@@ -223,20 +193,23 @@ class VectorStore:
 
         return matrix
 
-    def feature_scores(
+    def pair_evidence(
         self,
         query_track_id: str,
         candidate_track_id: str,
         *,
         embeddings: dict[str, list[EmbeddingRecord]] | None = None,
-    ) -> SimilarityFeatureScores | None:
-        embeddings = embeddings if embeddings is not None else self.all_embeddings()
-        normalized = _normalize_embeddings(embeddings)
+        normalized_embeddings: dict[str, NormalizedEmbeddings] | None = None,
+    ) -> PairEvidence | None:
+        normalized = normalized_embeddings
+        if normalized is None:
+            embeddings = embeddings if embeddings is not None else self.all_embeddings()
+            normalized = self.normalized_embeddings(embeddings)
         query = normalized.get(query_track_id)
         candidate = normalized.get(candidate_track_id)
         if query is None or candidate is None:
             return None
-        return _feature_scores(query, candidate)
+        return _pair_evidence(query, candidate)
 
     def similar_segments(
         self,
@@ -245,9 +218,14 @@ class VectorStore:
         *,
         limit: int = 5,
         embeddings: dict[str, list[EmbeddingRecord]] | None = None,
+        normalized_embeddings: dict[str, NormalizedEmbeddings] | None = None,
     ) -> list[dict[str, float | int | str]]:
         embeddings = embeddings if embeddings is not None else self.all_embeddings()
-        normalized = _normalize_embeddings(embeddings)
+        normalized = (
+            normalized_embeddings
+            if normalized_embeddings is not None
+            else _normalize_embeddings(embeddings)
+        )
         query_track = normalized.get(track_id)
         if query_track is None:
             return []
@@ -259,12 +237,13 @@ class VectorStore:
         for candidate_id, candidate in normalized.items():
             if candidate_id == track_id or not candidate.segment_semantic:
                 continue
-            candidate_scores = [
-                (index, _cosine_score(query_segment, candidate_segment))
-                for index, candidate_segment in enumerate(candidate.segment_semantic)
-            ]
-            candidate_segment_index, score = max(candidate_scores, key=lambda item: item[1])
-            scored.append((candidate_id, score, candidate_segment_index))
+            candidate_segment_index, local_score, context_score = _best_segment_match(
+                query_track.segment_semantic,
+                candidate.segment_semantic,
+                segment_index,
+            )
+            score = _segment_match_score(local_score, context_score)
+            scored.append((candidate_id, score, candidate_segment_index, local_score, context_score))
 
         scored.sort(key=lambda item: item[1], reverse=True)
         return [
@@ -273,32 +252,24 @@ class VectorStore:
                 "score": score,
                 "segment_index": candidate_segment_index,
                 "start_seconds": candidate_segment_index * SEGMENT_HOP_SECONDS,
+                "local_score": local_score,
+                "context_score": context_score,
             }
-            for candidate_id, score, candidate_segment_index in scored[:limit]
+            for (
+                candidate_id,
+                score,
+                candidate_segment_index,
+                local_score,
+                context_score,
+            ) in scored[:limit]
         ]
 
-    def segment_coverage_matrix(
+    def normalized_embeddings(
         self,
-        *,
         embeddings: dict[str, list[EmbeddingRecord]] | None = None,
-    ) -> dict[str, dict[str, float]]:
+    ) -> dict[str, NormalizedEmbeddings]:
         embeddings = embeddings if embeddings is not None else self.all_embeddings()
-        normalized = _normalize_embeddings(embeddings)
-        matrix: dict[str, dict[str, float]] = {track_id: {track_id: 1.0} for track_id in normalized}
-        ids = list(normalized)
-
-        for first_index, first_id in enumerate(ids):
-            for second_id in ids[first_index + 1 :]:
-                score = _segment_coverage_score(
-                    normalized[first_id].segment_semantic,
-                    normalized[second_id].segment_semantic,
-                )
-                if score is None:
-                    continue
-                matrix[first_id][second_id] = score
-                matrix[second_id][first_id] = score
-
-        return matrix
+        return _normalize_embeddings(embeddings)
 
     def _connect(self):
         import lancedb
@@ -328,11 +299,32 @@ class VectorStore:
             return self._tables[table_name]
 
         db = self._connect()
-        if table_name in db.table_names():
+        if table_name in _db_table_names(db):
             self._tables[table_name] = db.open_table(table_name)
             return self._tables[table_name]
 
         return None
+
+    def _embedding_table_rows(self) -> list[dict]:
+        rows: list[dict] = []
+        for table_name in self._embedding_table_names():
+            rows.extend(self._table_rows(table_name))
+        return rows
+
+    def _embedding_table_names(self) -> list[str]:
+        names = [TABLE_NAME]
+        try:
+            db = self._connect()
+            names.extend(
+                sorted(
+                    table_name
+                    for table_name in _db_table_names(db)
+                    if table_name.startswith(TABLE_PREFIX)
+                )
+            )
+        except Exception:
+            pass
+        return names
 
 
 def _embedding_rows(
@@ -361,6 +353,27 @@ def _embedding_rows(
             for idx, vector in enumerate(segment_vectors)
         ],
     ]
+
+
+def _rows_by_vector_dimension(rows: list[dict]) -> dict[int, list[dict]]:
+    grouped: dict[int, list[dict]] = {}
+    for row in rows:
+        dimension = len(row["vector"])
+        grouped.setdefault(dimension, []).append(row)
+    return grouped
+
+
+def _dimension_table_name(dimension: int) -> str:
+    return f"{TABLE_PREFIX}{dimension}"
+
+
+def _db_table_names(db) -> list[str]:
+    if hasattr(db, "list_tables"):
+        result = db.list_tables()
+        if hasattr(result, "tables"):
+            return list(result.tables)
+        return list(result)
+    return list(db.table_names())
 
 
 def _as_normalized_array(vector: list[float]) -> np.ndarray | None:
@@ -425,30 +438,6 @@ def _has_any_embedding(track: NormalizedEmbeddings) -> bool:
     )
 
 
-def _similar_from_normalized(
-    normalized: dict[str, NormalizedEmbeddings],
-    track_id: str,
-    *,
-    limit: int,
-    weights: SimilarityWeights,
-) -> list[dict[str, float | str]]:
-    query = normalized.get(track_id)
-    if query is None:
-        return []
-
-    scored: list[tuple[str, float]] = []
-    for candidate_id, candidate in normalized.items():
-        if candidate_id == track_id:
-            continue
-
-        score = _combined_score(query, candidate, weights)
-        if score is not None:
-            scored.append((candidate_id, score))
-
-    scored.sort(key=lambda item: item[1], reverse=True)
-    return [{"id": candidate_id, "score": score} for candidate_id, score in scored[:limit]]
-
-
 def _combined_score(
     query: NormalizedEmbeddings,
     candidate: NormalizedEmbeddings,
@@ -507,6 +496,27 @@ def _feature_scores(
     )
 
 
+def _pair_evidence(
+    query: NormalizedEmbeddings,
+    candidate: NormalizedEmbeddings,
+) -> PairEvidence:
+    return PairEvidence(
+        semantic_global=_optional_cosine_score(query.global_semantic, candidate.global_semantic),
+        semantic_segment_coverage=_segment_coverage_score(
+            query.segment_semantic,
+            candidate.segment_semantic,
+        ),
+        instrumental_global=_optional_cosine_score(
+            query.instrumental_global_semantic,
+            candidate.instrumental_global_semantic,
+        ),
+        instrumental_segment_coverage=_segment_coverage_score(
+            query.instrumental_segment_semantic,
+            candidate.instrumental_segment_semantic,
+        ),
+    )
+
+
 def _top_segment_score(
     query_arrays: list[np.ndarray],
     candidate_arrays: list[np.ndarray],
@@ -525,6 +535,58 @@ def _top_segment_score(
         reverse=True,
     )
     return _clamp_score(float(np.mean(scores[:top_k])))
+
+
+def _best_segment_match(
+    query_arrays: list[np.ndarray],
+    candidate_arrays: list[np.ndarray],
+    query_index: int,
+) -> tuple[int, float, float]:
+    query = query_arrays[query_index]
+    candidate_matrix = np.asarray(candidate_arrays, dtype=np.float32)
+    if (
+        candidate_matrix.ndim != 2
+        or candidate_matrix.shape[0] == 0
+        or candidate_matrix.shape[1] != len(query)
+    ):
+        return (0, 0.0, 0.0)
+
+    local_scores = np.clip(candidate_matrix @ query, 0.0, 1.0)
+    context_scores = local_scores.copy()
+    context_counts = np.ones(candidate_matrix.shape[0], dtype=np.float32)
+
+    previous_query_index = query_index - 1
+    if previous_query_index >= 0 and candidate_matrix.shape[0] > 1:
+        previous_scores = np.clip(
+            candidate_matrix[:-1] @ query_arrays[previous_query_index],
+            0.0,
+            1.0,
+        )
+        context_scores[1:] += previous_scores
+        context_counts[1:] += 1.0
+
+    next_query_index = query_index + 1
+    if next_query_index < len(query_arrays) and candidate_matrix.shape[0] > 1:
+        next_scores = np.clip(
+            candidate_matrix[1:] @ query_arrays[next_query_index],
+            0.0,
+            1.0,
+        )
+        context_scores[:-1] += next_scores
+        context_counts[:-1] += 1.0
+
+    context_scores = np.clip(context_scores / context_counts, 0.0, 1.0)
+    match_scores = np.clip(local_scores * 0.65 + context_scores * 0.35, 0.0, 1.0)
+    best_index = int(np.argmax(match_scores))
+    return (
+        best_index,
+        float(local_scores[best_index]),
+        float(context_scores[best_index]),
+    )
+
+
+def _segment_match_score(local_score: float, context_score: float) -> float:
+    return _clamp_score(local_score * 0.65 + context_score * 0.35)
 
 
 def _segment_coverage_score(
